@@ -26,6 +26,9 @@ app = FastAPI(title=settings.app_name, version=settings.app_version, lifespan=li
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
+    # Auto-allow any Vercel deployment — covers production, branch previews, and
+    # renames without needing a CORS_ORIGINS env update for each new URL.
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
