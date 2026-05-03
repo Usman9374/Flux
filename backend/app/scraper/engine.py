@@ -1,11 +1,19 @@
 import asyncio
 import logging
+import os
 import random
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import TypeVar
 
-from playwright.async_api import BrowserContext, async_playwright
+# Render's $HOME differs between build and runtime, so the default
+# ~/.cache/ms-playwright/ cache becomes invisible to the running app. Pin
+# the cache inside the project src/ tree (which Render preserves across
+# build → runtime) so `playwright install` (build) and chromium launch
+# (runtime) agree on a path. setdefault preserves any explicit override.
+os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/opt/render/project/src/.playwright")
+
+from playwright.async_api import BrowserContext, async_playwright  # noqa: E402
 
 log = logging.getLogger(__name__)
 
