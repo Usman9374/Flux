@@ -1,0 +1,30 @@
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Local-only spec / scratchpad (drives Claude sessions, not part of the product)
+readmealways.md
+.claude/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.local
+frontend/.env.*.local
+frontend/.vercel
+
+# Backend
+backend/.venv/
+backend/venv/
+backend/.env
+backend/__pycache__/
+backend/**/__pycache__/
+backend/*.pyc
+backend/.pytest_cache/
+
+# Tooling
+.cache/
+*.log
