@@ -8,12 +8,53 @@ import SignalGrid from '../components/SignalGrid.jsx'
 import { Btn, Panel, Pill, ScoreRing } from '../components/UI.jsx'
 import { downloadCSV, formatDate, formatRelative, hostname, leadsToCSV } from '../lib/format.js'
 
-function tierLabel(score) {
+function tierLabel(tier, score) {
+  if (tier === 'A') return { label: 'TIER A · HIGH INTENT', tone: 'accent' }
+  if (tier === 'B') return { label: 'TIER B · STRONG', tone: 'warm' }
+  if (tier === 'C') return { label: 'TIER C · PROMISING', tone: 'info' }
   if (score === null || score === undefined) return { label: 'UNSCORED', tone: 'default' }
   if (score >= 80) return { label: 'HIGH INTENT', tone: 'accent' }
   if (score >= 65) return { label: 'STRONG', tone: 'warm' }
   if (score >= 45) return { label: 'PROMISING', tone: 'info' }
   return { label: 'COLD', tone: 'err' }
+}
+
+const TOP_SIGNAL_LABELS = {
+  own_website: 'verified website',
+  website_confirmed: 'website cross-verified',
+  has_phone: 'phone listed',
+  has_named_email: 'named email',
+  has_generic_email: 'generic email',
+  category_match: 'category match',
+  location_match: 'location match',
+  rating_strong: 'strong reputation',
+  reviews_high: 'established footprint',
+  has_socials: 'active socials',
+  offline_verified: 'verified offline',
+}
+
+function whyKept(lead) {
+  const signals = lead.signals || {}
+  const reasons = []
+  // Reputation gets a numeric chip so it reads more concretely than just a flag.
+  if (lead.rating && lead.reviews_count) {
+    reasons.push(`★ ${Number(lead.rating).toFixed(1)} · ${lead.reviews_count} reviews`)
+  }
+  for (const key of [
+    'own_website',
+    'website_confirmed',
+    'has_named_email',
+    'has_phone',
+    'category_match',
+    'location_match',
+    'rating_strong',
+    'reviews_high',
+    'offline_verified',
+  ]) {
+    if (signals[key]) reasons.push(TOP_SIGNAL_LABELS[key] || key)
+    if (reasons.length >= 3) break
+  }
+  return reasons
 }
 
 function CopyButton({ value, label = 'Copy' }) {
@@ -170,7 +211,8 @@ export default function LeadDetailPage() {
     )
   }
 
-  const tier = tierLabel(lead.quality_score)
+  const tier = tierLabel(lead.tier, lead.quality_score)
+  const reasons = whyKept(lead)
   const host = hostname(lead.website)
   const sourceHost = hostname(lead.source_url)
   const exportOne = () => {
@@ -195,6 +237,14 @@ export default function LeadDetailPage() {
             <Pill tone={tier.tone} dot>
               {tier.label}
             </Pill>
+            {lead.confidence !== null && lead.confidence !== undefined ? (
+              <Pill tone="info">
+                Confidence {Math.round(Number(lead.confidence) * 100)}%
+              </Pill>
+            ) : null}
+            {reasons.slice(0, 3).map((r) => (
+              <Pill key={r}>{r}</Pill>
+            ))}
             {lead.niche ? <Pill>{lead.niche.toUpperCase()}</Pill> : null}
             {lead.location ? (
               <Pill>
@@ -202,7 +252,9 @@ export default function LeadDetailPage() {
               </Pill>
             ) : null}
             <Pill>
-              <Icon name="database" size={10} /> {lead.source || 'unknown source'}
+              <Icon name="database" size={10} /> {(lead.sources && lead.sources.length > 0)
+                ? lead.sources.join(' + ')
+                : lead.source || 'unknown source'}
             </Pill>
             <span className="text-mute mono" style={{ fontSize: 11.5 }}>
               Added {formatRelative(lead.created_at)}

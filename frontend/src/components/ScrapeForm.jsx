@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
-import { api } from '../lib/api.js'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { api, previewIntent } from '../lib/api.js'
 import { Btn } from './UI.jsx'
 import { ProgressBarCircle } from './base/progress-indicators/progress-circles.tsx'
 import { LoadingIndicator } from './application/loading-indicator/loading-indicator.tsx'
@@ -11,67 +11,174 @@ const NICHE_SUGGESTIONS = [
   'hvac company',
   'law firm',
   'chiropractor',
+  'restaurants without a website',
 ]
+
+const STAGE_LABELS = {
+  queued: 'Queued',
+  searching: 'Querying Google Maps',
+  scrolling: 'Loading result feed',
+  enriching_details: 'Reading detail panels',
+  backfill: 'Backfilling from search engine',
+  verifying_websites: 'Verifying websites',
+  enriching_websites: 'Fetching contact info from websites',
+  scoring: 'Scoring leads',
+  relaxing_filter: 'No top-tier leads — relaxing filter',
+  done: 'Done',
+  error: 'Error',
+}
+
+const POLL_INTERVAL_MS = 1000
+const MAX_POLL_AGE_MS = 5 * 60 * 1000
+
+function tierTone(tier) {
+  if (tier === 'A') return 'accent'
+  if (tier === 'B') return 'warm'
+  if (tier === 'C') return 'info'
+  return 'default'
+}
+
+function MiniLeadRow({ lead }) {
+  const tier = lead.tier || 'C'
+  return (
+    <div className={`scrape-lead-row tier-${tier.toLowerCase()}`}>
+      <span className={`tier-badge tone-${tierTone(tier)}`}>{tier}</span>
+      <span className="scrape-lead-name">{lead.name}</span>
+      <span className="scrape-lead-meta">
+        {lead.category || '—'}
+        {lead.phone ? ` · ${lead.phone}` : ''}
+        {lead.website ? ' · website' : ''}
+      </span>
+      <span className="scrape-lead-score">{lead.quality_score ?? '—'}</span>
+    </div>
+  )
+}
 
 export default function ScrapeForm({ onResult }) {
   const [niche, setNiche] = useState('')
   const [location, setLocation] = useState('')
   const [maxResults, setMaxResults] = useState(20)
-  const [minScore, setMinScore] = useState(35)
+  const [minScore, setMinScore] = useState(40)
   const [running, setRunning] = useState(false)
   const [progress, setProgress] = useState(0)
+  const [stage, setStage] = useState('queued')
   const [message, setMessage] = useState(null)
-  const tickRef = useRef(null)
+  const [banner, setBanner] = useState(null)
+  const [keptPreview, setKeptPreview] = useState([])
+  const [counts, setCounts] = useState({ raw: 0, kept: 0, dropped: 0 })
+  const [relaxed, setRelaxed] = useState(false)
+  const [partial, setPartial] = useState(false)
+  const pollRef = useRef(null)
+  const startedAtRef = useRef(0)
+
+  const intent = useMemo(() => previewIntent(niche), [niche])
 
   useEffect(() => {
-    if (!running) {
-      if (tickRef.current) clearInterval(tickRef.current)
-      tickRef.current = null
-      return
-    }
-    setProgress(8)
-    tickRef.current = setInterval(() => {
-      setProgress((p) => {
-        if (p >= 92) return p
-        const remaining = 92 - p
-        return Math.min(92, p + Math.max(0.6, remaining * 0.06))
-      })
-    }, 320)
     return () => {
-      if (tickRef.current) clearInterval(tickRef.current)
-      tickRef.current = null
+      if (pollRef.current) {
+        clearTimeout(pollRef.current)
+        pollRef.current = null
+      }
     }
-  }, [running])
+  }, [])
+
+  const reset = () => {
+    setRunning(false)
+    setProgress(0)
+    setStage('queued')
+    setKeptPreview([])
+    setCounts({ raw: 0, kept: 0, dropped: 0 })
+    setRelaxed(false)
+    setPartial(false)
+    if (pollRef.current) {
+      clearTimeout(pollRef.current)
+      pollRef.current = null
+    }
+  }
+
+  const pollJob = (jobId) => {
+    const tick = async () => {
+      try {
+        if (Date.now() - startedAtRef.current > MAX_POLL_AGE_MS) {
+          setBanner({ type: 'err', text: 'Scrape timed out (5 min). Try a narrower query.' })
+          reset()
+          return
+        }
+        const status = await api.getScrapeJob(jobId)
+        setProgress(Math.round((status.progress ?? 0) * 100))
+        setStage(status.stage || 'queued')
+        setCounts({
+          raw: status.raw_count || 0,
+          kept: status.kept_count || 0,
+          dropped: status.dropped_count || 0,
+        })
+        setKeptPreview(status.kept_preview || [])
+        setRelaxed(!!status.relaxed_filter)
+        setPartial(!!status.partial)
+        if (status.message) setMessage(status.message)
+
+        if (status.finished) {
+          if (status.error) {
+            setBanner({ type: 'err', text: status.error })
+            reset()
+            return
+          }
+          setProgress(100)
+          setStage('done')
+          const r = status.result || {}
+          setBanner({
+            type: 'ok',
+            text: `Done · kept ${r.kept_count ?? 0}/${r.raw_count ?? 0} · ${
+              r.inserted_count ?? 0
+            } new, ${r.updated_count ?? 0} updated.${
+              status.partial ? ' (partial)' : ''
+            }${status.relaxed_filter ? ' (relaxed filter)' : ''}`,
+          })
+          onResult?.(r)
+          setRunning(false)
+          if (pollRef.current) {
+            clearTimeout(pollRef.current)
+            pollRef.current = null
+          }
+          return
+        }
+        pollRef.current = setTimeout(tick, POLL_INTERVAL_MS)
+      } catch (err) {
+        setBanner({ type: 'err', text: err.message || 'Polling failed.' })
+        reset()
+      }
+    }
+    tick()
+  }
 
   const submit = async (e) => {
     e?.preventDefault?.()
     if (!niche.trim() || !location.trim()) {
-      setMessage({ type: 'err', text: 'Niche and location are both required.' })
+      setBanner({ type: 'err', text: 'Niche and location are both required.' })
       return
     }
+    reset()
     setRunning(true)
-    setProgress(8)
-    setMessage({ type: 'info', text: `Scraping "${niche}" in ${location}…` })
+    setProgress(2)
+    setStage('queued')
+    startedAtRef.current = Date.now()
+    setMessage(`Starting scrape for "${niche}" in ${location}…`)
+    setBanner(null)
     try {
-      const result = await api.scrape({
+      const { job_id: jobId } = await api.createScrapeJob({
         niche: niche.trim(),
         location: location.trim(),
         max_results: Number(maxResults),
         min_quality_score: Number(minScore),
       })
-      setProgress(100)
-      setMessage({
-        type: 'ok',
-        text: `Done · kept ${result.kept_count}/${result.raw_count} · ${result.inserted_count} new, ${result.updated_count} updated.`,
-      })
-      onResult?.(result)
+      pollJob(jobId)
     } catch (err) {
-      setMessage({ type: 'err', text: err.message || 'Scrape failed.' })
-    } finally {
-      setRunning(false)
-      setTimeout(() => setProgress(0), 800)
+      setBanner({ type: 'err', text: err.message || 'Failed to start scrape.' })
+      reset()
     }
   }
+
+  const stageLabel = STAGE_LABELS[stage] || stage
 
   return (
     <form onSubmit={submit}>
@@ -139,6 +246,17 @@ export default function ScrapeForm({ onResult }) {
           </div>
         </div>
 
+        {niche.trim() && location.trim() ? (
+          <div className="intent-preview">
+            <span className="intent-chip">
+              Searching: <strong>{intent.cleaned_niche}</strong> in <strong>{location}</strong>
+            </span>
+            <span className={`intent-chip mode-${intent.require_website ? 'online' : 'offline'}`}>
+              {intent.mode_label}
+            </span>
+          </div>
+        ) : null}
+
         <div className="prompt-foot">
           <div style={{ flex: 1 }} />
           <Btn
@@ -163,9 +281,13 @@ export default function ScrapeForm({ onResult }) {
                 <LoadingIndicator type="line-spinner" size="sm" />
               </div>
               <div className="scrape-progress-text">
-                <strong>Scraping leads</strong>
+                <strong>{stageLabel}</strong>
                 <span>
-                  {niche || 'niche'} · {location || 'location'} · target {maxResults}
+                  {message || `${niche || 'niche'} · ${location || 'location'}`}
+                  {counts.raw ? ` · raw ${counts.raw}` : ''}
+                  {counts.kept ? ` · kept ${counts.kept}` : ''}
+                  {partial ? ' · partial' : ''}
+                  {relaxed ? ' · relaxed' : ''}
                 </span>
               </div>
             </div>
@@ -176,13 +298,27 @@ export default function ScrapeForm({ onResult }) {
         </div>
       ) : null}
 
-      {message && !running ? (
+      {keptPreview.length > 0 && running ? (
+        <div className="scrape-preview mt-22">
+          <header className="scrape-preview-head">
+            <strong>Live leads</strong>
+            <span>{keptPreview.length} kept · streaming as we score</span>
+          </header>
+          <div className="scrape-preview-list">
+            {keptPreview.map((lead, i) => (
+              <MiniLeadRow key={`${lead.name}-${i}`} lead={lead} />
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {banner && !running ? (
         <div
           className={`banner mt-22 ${
-            message.type === 'err' ? 'err' : message.type === 'ok' ? 'ok' : ''
+            banner.type === 'err' ? 'err' : banner.type === 'ok' ? 'ok' : ''
           }`}
         >
-          {message.text}
+          {banner.text}
         </div>
       ) : null}
     </form>

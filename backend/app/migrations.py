@@ -33,6 +33,14 @@ _LEADS_COLUMNS: list[tuple[str, str, str | None]] = [
     ("signals", "jsonb", None),
     ("updated_at", "timestamptz", "DEFAULT now() NOT NULL"),
     ("owner_uid", "varchar(128)", None),
+    # New columns from the lead-quality overhaul (§3 of LEAD_GENERATION_FIX.md).
+    ("sources", "jsonb", None),
+    ("map_url", "text", None),
+    ("tier", "varchar(4)", None),
+    ("confidence", "double precision", None),
+    ("tagline", "text", None),
+    ("years_in_business", "integer", None),
+    ("fetched_at", "timestamptz", None),
 ]
 
 
@@ -61,7 +69,7 @@ def ensure_leads_schema(engine: Engine) -> None:
             "ON leads (coalesce(owner_uid, ''), lower(name), lower(coalesce(location, '')), source)"
         ))
         # Helpful single-column indexes for filtering (idempotent).
-        for col in ("location", "niche", "quality_score", "owner_uid"):
+        for col in ("location", "niche", "quality_score", "owner_uid", "tier"):
             conn.execute(text(
                 f"CREATE INDEX IF NOT EXISTS ix_leads_{col} ON leads ({col})"
             ))

@@ -12,7 +12,11 @@ import EmptyState from './EmptyState.jsx'
 import { Icon } from './Icon.jsx'
 import { formatRelative, hostname } from '../lib/format.js'
 
-function tierTone(score) {
+function tierTone(tier, score) {
+  if (tier === 'A') return 'accent'
+  if (tier === 'B') return 'warm'
+  if (tier === 'C') return 'info'
+  // Back-compat for legacy rows without tier — derive from score.
   if (score === null || score === undefined) return 'default'
   if (score >= 80) return 'accent'
   if (score >= 65) return 'warm'
@@ -20,7 +24,8 @@ function tierTone(score) {
   return 'default'
 }
 
-function tierLabel(score) {
+function tierLabel(tier, score) {
+  if (tier) return `TIER ${tier}`
   if (score === null || score === undefined) return 'UNSCORED'
   if (score >= 80) return 'HIGH'
   if (score >= 65) return 'STRONG'
@@ -139,8 +144,8 @@ export default function LeadsTable({
         sortingFn: 'alphanumeric',
         cell: ({ row }) =>
           row.original.niche ? (
-            <Pill tone={tierTone(row.original.quality_score)} dot>
-              {tierLabel(row.original.quality_score)} · {row.original.niche}
+            <Pill tone={tierTone(row.original.tier, row.original.quality_score)} dot>
+              {tierLabel(row.original.tier, row.original.quality_score)} · {row.original.niche}
             </Pill>
           ) : (
             <span className="muted">—</span>

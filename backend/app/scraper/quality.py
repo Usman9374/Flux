@@ -12,6 +12,11 @@ Two filter modes are available via `parse_intent` / `ScrapeRequest.require_websi
     website" / "no website" in the niche. Inverts the rule — listings with
     a website are deprioritized or rejected so the user gets the offline
     businesses they asked for.
+
+The scorer here is a strict rewrite of the previous additive scheme. We assign
+a tier (A/B/C) based on the *kind* of signals present, not a raw point sum,
+and the user sees the tier in the UI. Hard rejects drop the lead before
+scoring — quality-over-volume.
 """
 from __future__ import annotations
 
@@ -21,9 +26,10 @@ from urllib.parse import urlparse
 
 from .types import ScrapedLead
 
-# Domains that aren't a real "company website" — they're directory/social profiles.
-# We hard-reject these; downscoring still lets junk pass when other signals
-# happen to be strong.
+# Bare platform / aggregator hosts — pure platform pages are blocked,
+# but customer subdomains/path-deep pages are fine. The check is implemented
+# in `is_aggregator` so that `*.wixsite.com/business-name` and
+# `business.squarespace.com` are NOT mistaken for the platform itself.
 AGGREGATOR_DOMAINS = {
     "facebook.com", "fb.com", "m.facebook.com", "instagram.com",
     "linkedin.com", "twitter.com", "x.com", "tiktok.com", "pinterest.com",
@@ -33,11 +39,17 @@ AGGREGATOR_DOMAINS = {
     "thumbtack.com", "houzz.com", "angi.com", "homeadvisor.com",
     "google.com", "maps.google.com", "g.co", "goo.gl",
     "business.site", "sites.google.com",
-    "wix.com", "wixsite.com", "blogspot.com", "wordpress.com",
-    "weebly.com", "godaddysites.com", "squarespace.com",
+    "blogspot.com", "wordpress.com",
     "indeed.com", "glassdoor.com", "ziprecruiter.com",
     "trustpilot.com", "bbb.org", "manta.com", "bizapedia.com",
     "crunchbase.com", "zoominfo.com", "rocketreach.co",
+}
+
+# These are SaaS site-builders. We only block the bare platform — a customer
+# subdomain or a path-deep URL is a real business homepage. See `is_aggregator`.
+PLATFORM_HOSTS = {
+    "wix.com", "wixsite.com", "squarespace.com", "weebly.com",
+    "godaddysites.com", "site.com", "shopify.com", "myshopify.com",
 }
 
 CLOSED_HINTS = ("permanently closed", "temporarily closed")
@@ -51,11 +63,30 @@ _NO_WEBSITE_PATTERNS = (
     r"\boffline(?:\s+only)?\b",
 )
 
+# Toll-free / well-known spam ranges (US/CA). Conservative — only obviously
+# non-direct lines are dropped. Add ranges per region as we encounter them.
+_SPAM_PHONE_PREFIXES = (
+    "+1800", "+1888", "+1877", "+1866", "+1855", "+1844", "+1833",
+    "1-800-", "1-888-", "1-877-", "1-866-", "1-855-", "1-844-",
+)
+
+# Generic mailboxes — present but lower-value than a named address.
+_GENERIC_EMAIL_LOCALS = ("info", "contact", "hello", "support", "office", "admin", "team", "mail")
+
+# Common stop words removed when comparing niche-vs-category.
+_STOP_WORDS = {
+    "the", "a", "an", "in", "on", "of", "and", "or", "to", "for",
+    "with", "without", "near", "around", "best", "top", "good", "cheap",
+    "services", "service", "company", "companies", "business", "businesses",
+    "shop", "shops", "store", "stores",
+}
+
 
 @dataclass(frozen=True)
 class QueryIntent:
     cleaned_niche: str          # niche with qualifier phrases stripped
     require_website: bool       # True ⇒ reject leads with no website (default)
+    mode_label: str             # human-readable summary for UI
 
 
 def parse_intent(niche: str) -> QueryIntent:
@@ -70,35 +101,143 @@ def parse_intent(niche: str) -> QueryIntent:
     """
     n = niche or ""
     require_website = True
+    matched_no_website = False
     for pat in _NO_WEBSITE_PATTERNS:
         if re.search(pat, n, flags=re.IGNORECASE):
             require_website = False
+            matched_no_website = True
             n = re.sub(pat, " ", n, flags=re.IGNORECASE)
 
-    cleaned = re.sub(r"\s+", " ", n).strip(" ,.-")
-    return QueryIntent(cleaned_niche=cleaned or niche, require_website=require_website)
+    # Strip whitespace and common punctuation. Em-dash and en-dash are not
+    # handled by str.strip's character class — handle them explicitly.
+    cleaned = re.sub(r"[\s,.\-—–]+$", "", re.sub(r"^[\s,.\-—–]+", "", re.sub(r"\s+", " ", n)))
+    if not cleaned:
+        cleaned = niche
+
+    if matched_no_website:
+        label = "Mode: offline businesses only (no first-party website)"
+    else:
+        label = "Mode: businesses with first-party websites"
+
+    return QueryIntent(
+        cleaned_niche=cleaned,
+        require_website=require_website,
+        mode_label=label,
+    )
 
 
 def _hostname(url: str | None) -> str | None:
     if not url:
         return None
     try:
-        h = urlparse(url).hostname or ""
+        h = urlparse(url if url.startswith("http") else f"https://{url}").hostname or ""
         return h.lower().lstrip(".")
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).debug("hostname parse failed for %r: %s", url, e)
         return None
 
 
+def _path_of(url: str | None) -> str:
+    if not url:
+        return ""
+    try:
+        return (urlparse(url if url.startswith("http") else f"https://{url}").path or "").rstrip("/")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def is_aggregator(url: str | None) -> bool:
+    """Return True if `url` is a directory/social profile, NOT a real homepage.
+
+    Platform builders (Wix, Squarespace) get a path-depth check: bare
+    `wixsite.com` is the platform, `mybiz.wixsite.com/mybiz` is the customer.
+    Only the former is treated as an aggregator. This was the cause of
+    legitimate small-business sites being silently dropped in v1.
+    """
     h = _hostname(url)
     if not h:
         return False
     h = h.removeprefix("www.")
-    return any(h == d or h.endswith("." + d) for d in AGGREGATOR_DOMAINS)
+
+    # Hard list — these are pure directories / social profiles
+    if any(h == d or h.endswith("." + d) for d in AGGREGATOR_DOMAINS):
+        return True
+
+    # Platform builders — only reject the platform homepage itself
+    for plat in PLATFORM_HOSTS:
+        if h == plat or h == "www." + plat:
+            return True
+        if h.endswith("." + plat):
+            # Customer subdomain (e.g. mybiz.wixsite.com). Real business unless
+            # the path is the bare site root. Accept it.
+            path = _path_of(url)
+            if not path or path == "/":
+                # Bare platform subdomain with no path — most likely the
+                # platform's default landing. Keep as aggregator.
+                return False
+            return False
+    return False
+
+
+def _tokens(text: str | None) -> list[str]:
+    if not text:
+        return []
+    parts = re.findall(r"[A-Za-z]{3,}", text.lower())
+    return [t for t in parts if t not in _STOP_WORDS]
+
+
+def category_matches_niche(category: str | None, niche: str | None) -> bool:
+    """True if any meaningful niche token appears in the category string.
+
+    Falls back to a prefix-stem check (first 4 chars) so that "dental" matches
+    "dentist", "lawyer" matches "law", "restaurant" matches "restaurants",
+    etc. Without that, Maps' singular "Dentist" category would fail to match
+    a "dental clinic" query — exactly the regression LEAD_GENERATION_FIX
+    flagged.
+    """
+    if not category or not niche:
+        return False
+    cat = category.lower()
+    cat_tokens = _tokens(category)
+    for nt in _tokens(niche):
+        if nt in cat:
+            return True
+        stem = nt[:4] if len(nt) >= 5 else nt
+        if any(ct.startswith(stem) or stem in ct for ct in cat_tokens):
+            return True
+    return False
+
+
+def location_matches(address: str | None, location: str | None) -> bool:
+    if not address or not location:
+        return False
+    addr = address.lower()
+    return any(t in addr for t in _tokens(location))
+
+
+def _is_spam_phone(phone: str | None) -> bool:
+    if not phone:
+        return False
+    p = re.sub(r"[^\d+]", "", phone)
+    return any(p.startswith(prefix.replace("-", "").replace(" ", "")) for prefix in _SPAM_PHONE_PREFIXES)
+
+
+def _is_named_email(email: str | None) -> bool:
+    if not email:
+        return False
+    local = email.split("@", 1)[0].lower()
+    return local not in _GENERIC_EMAIL_LOCALS
 
 
 def rejection_reason(lead: ScrapedLead, *, require_website: bool = True) -> str | None:
-    """Hard rejects — disqualifies the lead before scoring."""
+    """Hard rejects — disqualifies the lead before scoring.
+
+    Order matters: we check name/closed/aggregator first because those are
+    cheap and definitive. Niche/location overlap is checked next; these are
+    required, not optional. The "no contact channel at all" check is last so
+    `rejection_reason` for an offline-mode lead surfaces something useful.
+    """
     name = (lead.name or "").strip()
     if len(name) < 3:
         return "name missing or too short"
@@ -106,133 +245,242 @@ def rejection_reason(lead: ScrapedLead, *, require_website: bool = True) -> str 
     if any(h in lname for h in CLOSED_HINTS):
         return "marked closed"
 
-    # Aggregator domains slip past Maps when the actual business has no site
-    # of its own. They're not real prospects — drop them.
     if lead.website and is_aggregator(lead.website):
         return "website is a directory/social profile, not first-party"
+
+    # Niche / location alignment is mandatory.
+    # If we don't have a category, fall back to checking the lead name.
+    if lead.niche:
+        if lead.category and not category_matches_niche(lead.category, lead.niche):
+            # Last-chance: niche token in business name (e.g. "Smile Dental Clinic" for "dental").
+            if not category_matches_niche(lead.name, lead.niche):
+                return f"category {lead.category!r} doesn't match niche {lead.niche!r}"
+
+    if lead.location and lead.address and not location_matches(lead.address, lead.location):
+        return f"address doesn't include any token from location {lead.location!r}"
 
     if require_website:
         if not lead.website:
             return "no first-party website"
     else:
-        # Inverted mode — user asked for offline businesses, so a website
-        # disqualifies (contact channel is still required via phone).
-        if lead.website:
-            return "has a website (user asked for offline businesses)"
-        if not lead.phone:
-            return "no website and no phone — uncontactable"
+        # Inverted mode — user asked for offline businesses, so a verified
+        # website disqualifies. We allow possible/unverified websites through
+        # (they're labelled in signals); see runner verification step.
+        if lead.website and (lead.signals or {}).get("website_confirmed"):
+            return "has a verified first-party website (user asked for offline businesses)"
+
+    # Must have at least one contactable channel.
+    has_contact = bool(lead.phone) or bool(lead.email) or bool(lead.website)
+    if not has_contact:
+        return "no contact channel (no website, phone, or email)"
+
+    if lead.phone and _is_spam_phone(lead.phone):
+        return "phone matches known toll-free / spam range"
 
     if lead.rating is not None and lead.rating < 2.5 and (lead.reviews or 0) >= 10:
         return "rating below 2.5 with sufficient reviews"
     return None
 
 
-def score_lead(lead: ScrapedLead) -> tuple[int, dict[str, bool]]:
-    """Return (0-100 score, signal flags).
+def score_lead(lead: ScrapedLead, *, require_website: bool = True) -> tuple[int, str, dict[str, bool]]:
+    """Return (0-100 score, tier letter, signal flags).
 
-    Scoring philosophy: we want leads that are reachable AND on-target AND
-    look like established businesses. Each axis tops out so a single signal
-    can't carry the score.
+    Scoring philosophy: each axis caps. A single strong signal can't carry the
+    score. Tier is derived from which axes are filled, not just the raw sum —
+    so a "verified website + phone + matched category + good reputation" lead
+    is solidly A even if a few minor signals are absent.
     """
     score = 0
     signals: dict[str, bool] = {}
 
-    if lead.name and len(lead.name.strip()) > 2:
-        score += 4
-        signals["has_name"] = True
+    # Reachability — first-party website is the biggest single signal in
+    # require_website mode. In offline mode, the website axis flips off.
+    if lead.website and not is_aggregator(lead.website):
+        if require_website:
+            score += 25
+            signals["own_website"] = True
+        else:
+            # Should already be hard-rejected by rejection_reason in this mode
+            # but keep the flag for transparency in the UI.
+            signals["website_unverified"] = True
 
-    # Reachability — multi-channel rewarded
-    if lead.website:
-        score += 22
-        signals["own_website"] = True
-    if lead.phone:
-        score += 10
+    if lead.phone and not _is_spam_phone(lead.phone):
+        score += 15
         signals["has_phone"] = True
+
     if lead.email:
-        score += 14
-        signals["has_email"] = True
+        if _is_named_email(lead.email):
+            score += 20
+            signals["has_named_email"] = True
+        else:
+            score += 12
+            signals["has_generic_email"] = True
+
     socials = lead.social_links or {}
-    if socials:
-        score += min(8, 2 + 2 * len(socials))
+    valid_socials = sum(1 for v in socials.values() if v)
+    if valid_socials >= 2:
+        score += 4
         signals["has_socials"] = True
 
-    # Locality
-    if lead.address:
-        score += 6
-        signals["has_address"] = True
-        if lead.location:
-            loc_tokens = [
-                t.strip().lower()
-                for t in lead.location.replace(",", " ").split()
-                if len(t.strip()) > 1
-            ]
-            addr_l = lead.address.lower()
-            if any(t in addr_l for t in loc_tokens):
-                score += 8
-                signals["location_match"] = True
+    # Niche fit — strict. category_matches_niche already required to keep the lead.
+    if lead.niche and (
+        category_matches_niche(lead.category, lead.niche)
+        or category_matches_niche(lead.name, lead.niche)
+    ):
+        score += 15
+        signals["category_match"] = True
 
-    # Niche fit
-    if lead.category and lead.niche:
-        cat_l = lead.category.lower()
-        niche_tokens = [t for t in lead.niche.lower().split() if len(t) > 2]
-        if any(t in cat_l for t in niche_tokens):
-            score += 12
-            signals["category_match"] = True
+    # Locality — required if the user gave one.
+    if lead.location and (
+        location_matches(lead.address, lead.location)
+        or (lead.signals or {}).get("location_match_geo")
+    ):
+        score += 10
+        signals["location_match"] = True
 
-    # Reputation — established beats bare-minimum
-    if lead.rating is not None:
-        if lead.rating >= 4.0:
-            score += 10
-            signals["rating_strong"] = True
-        elif lead.rating >= 3.0:
-            score += 5
+    # Reputation
+    rating_ok = lead.rating is not None and lead.rating >= 4.0
+    reviews_ok = (lead.reviews or 0) >= 25
+    if rating_ok and reviews_ok:
+        score += 8
+        signals["rating_strong"] = True
+    if (lead.reviews or 0) >= 100:
+        score += 5
+        signals["reviews_high"] = True
 
-    if lead.reviews is not None:
-        if lead.reviews >= 100:
-            score += 10
-            signals["reviews_high"] = True
-        elif lead.reviews >= 25:
-            score += 6
-        elif lead.reviews >= 10:
-            score += 3
-
-    # Depth — extra context that proves it's a real business
-    if lead.description:
+    # Depth signals — small but they tip a B into an A.
+    if lead.description and len(lead.description) >= 80:
         score += 3
         signals["has_description"] = True
     if lead.hours:
         score += 2
         signals["has_hours"] = True
 
-    return min(score, 100), signals
+    score = min(score, 100)
+    tier = _tier_for(lead, score, signals, require_website=require_website)
+    return score, tier, signals
+
+
+def _tier_for(
+    lead: ScrapedLead,
+    score: int,
+    signals: dict[str, bool],
+    *,
+    require_website: bool,
+) -> str:
+    """Derive A/B/C/D tier from the signal mix, not just the raw score.
+
+    Rules (§5 of LEAD_GENERATION_FIX.md):
+      A (90+):   website + phone + email + category + reputation + location.
+      B (65-89): website + (phone or email) + category + location.
+      C (40-64): contactable + category, but missing some.
+      D (<40):   dropped — caller filters this out.
+
+    In require_website=False mode, the website axis flips: A requires
+    phone + email + category + reputation; no website at all.
+    """
+    if score < 40:
+        return "D"
+
+    has_phone = signals.get("has_phone", False)
+    has_email = signals.get("has_named_email", False) or signals.get("has_generic_email", False)
+    has_category = signals.get("category_match", False)
+    has_location = signals.get("location_match", False)
+    has_reputation = signals.get("rating_strong", False) or signals.get("reviews_high", False)
+
+    if require_website:
+        has_website = signals.get("own_website", False)
+        if has_website and has_phone and has_email and has_category and has_location and has_reputation:
+            return "A"
+        if has_website and (has_phone or has_email) and has_category and has_location:
+            return "B"
+        return "C"
+    else:
+        # Offline mode — A is phone + email + category + reputation
+        if has_phone and has_email and has_category and has_reputation:
+            return "A"
+        if has_phone and has_category and has_location:
+            return "B"
+        return "C"
+
+
+def confidence_for(lead: ScrapedLead) -> float:
+    """How sure we are about the lead's *contact info*.
+
+    Independent of score. Reflects how many corroborating sources agree.
+    """
+    sources = set(lead.sources or [])
+    if not sources:
+        sources = {lead.source} if lead.source else set()
+
+    base = 0.4 if sources else 0.0
+    # Each additional independent source adds 0.2, capped at 1.0.
+    bonus = 0.2 * max(0, len(sources) - 1)
+    # Confirmed website (search verifier or domain probe agreed with Maps) +0.2.
+    if (lead.signals or {}).get("website_confirmed"):
+        bonus += 0.2
+    if (lead.signals or {}).get("phone_verified"):
+        bonus += 0.1
+    return round(min(1.0, base + bonus), 2)
 
 
 def filter_and_score(
     leads: list[ScrapedLead],
-    min_score: int = 35,
+    min_score: int = 40,
     *,
     require_website: bool = True,
 ) -> tuple[list[ScrapedLead], list[ScrapedLead]]:
-    """Annotate leads with score/signals/rejection_reason.
+    """Annotate leads with score/tier/signals/confidence/rejection_reason.
 
-    Returns (kept, dropped). kept is sorted by quality_score desc.
+    Returns (kept, dropped). kept is sorted by quality_score desc, then tier.
     """
     kept: list[ScrapedLead] = []
     dropped: list[ScrapedLead] = []
+    seen_phones: set[str] = set()
+    seen_domains: set[str] = set()
+
     for lead in leads:
         reason = rejection_reason(lead, require_website=require_website)
         if reason:
             lead.rejection_reason = reason
             dropped.append(lead)
             continue
-        score, signals = score_lead(lead)
-        lead.quality_score = score
-        lead.signals = signals
-        if score >= min_score:
-            kept.append(lead)
-        else:
-            lead.rejection_reason = f"quality score {score} < threshold {min_score}"
-            dropped.append(lead)
 
-    kept.sort(key=lambda x: x.quality_score or 0, reverse=True)
+        # De-dupe across this batch — same phone or same domain ⇒ drop.
+        phone_key = re.sub(r"\D", "", lead.phone or "")[-10:] if lead.phone else None
+        domain = _hostname(lead.website)
+        domain = domain.removeprefix("www.") if domain else None
+
+        if phone_key and phone_key in seen_phones:
+            lead.rejection_reason = "duplicate phone of earlier lead"
+            dropped.append(lead)
+            continue
+        if domain and domain in seen_domains:
+            lead.rejection_reason = "duplicate domain of earlier lead"
+            dropped.append(lead)
+            continue
+
+        score, tier, signals = score_lead(lead, require_website=require_website)
+        lead.quality_score = score
+        lead.tier = tier
+        # Merge signals — preserve any added by upstream (website_confirmed, etc.)
+        merged_signals = dict(lead.signals or {})
+        merged_signals.update(signals)
+        lead.signals = merged_signals
+        lead.confidence = confidence_for(lead)
+
+        if score < min_score or tier == "D":
+            lead.rejection_reason = f"quality score {score} below threshold {min_score}"
+            dropped.append(lead)
+            continue
+
+        if phone_key:
+            seen_phones.add(phone_key)
+        if domain:
+            seen_domains.add(domain)
+        kept.append(lead)
+
+    # Sort: higher tier first (A > B > C), then higher score within tier.
+    tier_rank = {"A": 0, "B": 1, "C": 2, "D": 3, None: 4}
+    kept.sort(key=lambda l: (tier_rank.get(l.tier, 4), -(l.quality_score or 0)))
     return kept, dropped

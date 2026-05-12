@@ -5,55 +5,85 @@ const CANONICAL_SIGNALS = [
     key: 'own_website',
     label: 'First-party website',
     hint: 'Lead operates its own domain — strongest reachability signal.',
-    weight: '+30',
+    weight: '+25',
   },
   {
-    key: 'website_aggregator',
-    label: 'Aggregator profile',
-    hint: 'Listed only on a directory or social profile (Yelp, Facebook, etc.).',
-    weight: '+8',
+    key: 'website_confirmed',
+    label: 'Website cross-verified',
+    hint: 'Independent search-engine result matched the same homepage.',
+    weight: '+ confidence',
   },
   {
     key: 'has_phone',
     label: 'Phone listed',
-    hint: 'Public phone number is available for outreach.',
-    weight: '+10',
+    hint: 'Public phone number passes spam/toll-free checks.',
+    weight: '+15',
   },
   {
-    key: 'has_address',
-    label: 'Physical address',
-    hint: 'Street address resolved — confirms a real-world location.',
-    weight: '+10',
+    key: 'has_named_email',
+    label: 'Named email address',
+    hint: 'A direct mailbox (named contact) was found, not just info@.',
+    weight: '+20',
   },
   {
-    key: 'location_match',
-    label: 'Location match',
-    hint: 'Address contains tokens from the searched city / region.',
-    weight: '+10',
+    key: 'has_generic_email',
+    label: 'Generic email address',
+    hint: 'A shared mailbox (info@/contact@) was found.',
+    weight: '+12',
+  },
+  {
+    key: 'has_socials',
+    label: 'Active social presence',
+    hint: '2+ social platforms with real business handles (not share buttons).',
+    weight: '+4',
   },
   {
     key: 'category_match',
     label: 'Category match',
-    hint: 'Listed business category aligns with your niche query.',
+    hint: "Listed Maps category matches one of your niche's tokens.",
     weight: '+15',
+  },
+  {
+    key: 'location_match',
+    label: 'Location match',
+    hint: 'Address contains a token from your queried location.',
+    weight: '+10',
   },
   {
     key: 'rating_strong',
     label: 'Strong reputation',
-    hint: '4.0★ or higher across public reviews.',
-    weight: '+10',
+    hint: '4.0★ or higher with 25+ public reviews.',
+    weight: '+8',
   },
   {
     key: 'reviews_high',
     label: 'Established footprint',
-    hint: 'Has 50+ public reviews — long-running operation.',
-    weight: '+10',
+    hint: '100+ public reviews — long-running operation.',
+    weight: '+5',
   },
   {
-    key: 'has_name',
-    label: 'Verified name',
-    hint: 'Business name was extracted cleanly during the scrape.',
-    weight: '+5',
+    key: 'offline_verified',
+    label: 'Verified offline',
+    hint: 'Search engine could not find a first-party website for this business.',
+    weight: 'offline mode',
+  },
+  {
+    key: 'website_unverified',
+    label: 'Possible website (low confidence)',
+    hint: 'A homepage may exist but the match confidence is below the verify threshold.',
+    weight: 'flagged',
+  },
+  {
+    key: 'has_description',
+    label: 'Editorial description',
+    hint: '80+ char description from the homepage <meta> or Maps summary.',
+    weight: '+3',
+  },
+  {
+    key: 'has_hours',
+    label: 'Hours present',
+    hint: 'Public operating hours found.',
+    weight: '+2',
   },
 ]
 
@@ -81,7 +111,9 @@ function SignalCard({ on, label, hint, weight, index }) {
 
 export default function SignalGrid({ signals }) {
   const map = signals && typeof signals === 'object' ? signals : {}
-  const extras = Object.entries(map).filter(([k, v]) => v && !KNOWN_KEYS.has(k))
+  const extras = Object.entries(map).filter(
+    ([k, v]) => v && !KNOWN_KEYS.has(k) && typeof v !== 'string',
+  )
 
   return (
     <div className="signal-grid">

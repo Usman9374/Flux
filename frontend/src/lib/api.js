@@ -55,6 +55,43 @@ export const api = {
   listLeads: (params, signal) => request('/leads', { params, signal }),
   getLead: (id, signal) => request(`/leads/${id}`, { signal }),
   scrape: (body, signal) => request('/scrape', { method: 'POST', body, signal }),
+  // Async job flow — preferred over the legacy sync POST /scrape. Returns
+  // { job_id } immediately; the caller then polls getScrapeJob.
+  createScrapeJob: (body, signal) =>
+    request('/scrape/jobs', { method: 'POST', body, signal }),
+  getScrapeJob: (jobId, signal) =>
+    request(`/scrape/jobs/${encodeURIComponent(jobId)}`, { signal }),
+}
+
+// Live intent preview — mirrors backend `parse_intent`. Used by ScrapeForm
+// to show the user what we'll actually search for before they hit submit,
+// so "restaurants in Islamabad without a website" displays as a known mode
+// rather than just being submitted as raw text.
+const NO_WEBSITE_PATTERNS = [
+  /\bwithout\s+(?:a\s+)?website/i,
+  /\bno\s+website/i,
+  /\bnot\s+having\s+(?:a\s+)?website/i,
+  /\b(?:doesn'?t|don'?t|do\s+not|does\s+not)\s+have\s+(?:a\s+)?website/i,
+  /\boffline(?:\s+only)?\b/i,
+]
+export function previewIntent(niche) {
+  let cleaned = niche || ''
+  let requireWebsite = true
+  for (const pat of NO_WEBSITE_PATTERNS) {
+    if (pat.test(cleaned)) {
+      requireWebsite = false
+      cleaned = cleaned.replace(pat, ' ')
+    }
+  }
+  cleaned = cleaned.replace(/\s+/g, ' ').replace(/^[ ,.\-]+|[ ,.\-]+$/g, '').trim()
+  if (!cleaned) cleaned = niche || ''
+  return {
+    cleaned_niche: cleaned,
+    require_website: requireWebsite,
+    mode_label: requireWebsite
+      ? 'Mode: businesses with first-party websites'
+      : 'Mode: offline businesses only (no first-party website)',
+  }
 }
 
 export { API_BASE }

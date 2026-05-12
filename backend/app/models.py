@@ -27,9 +27,18 @@ class Lead(Base):
     reviews_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     social_links: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     source: Mapped[str] = mapped_column(String(64), nullable=False, server_default="google_maps")
+    sources: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    map_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     quality_score: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    tier: Mapped[str | None] = mapped_column(String(4), nullable=True, index=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    tagline: Mapped[str | None] = mapped_column(Text, nullable=True)
+    years_in_business: Mapped[int | None] = mapped_column(Integer, nullable=True)
     signals: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    fetched_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
