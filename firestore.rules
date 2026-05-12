@@ -1,0 +1,71 @@
+rules_version = '2';
+
+// Flux — Firestore security rules
+// Mirror of frontend/src/lib/firebase.js ADMIN_EMAILS.
+// Paste this entire file into:
+//   Firebase Console -> Firestore Database -> Rules
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdminEmail() {
+      return isSignedIn()
+        && request.auth.token.email != null
+        && request.auth.token.email.lower() in [
+          'muhammadnabeer2004@gmail.com',
+          'muhammadusman193744@gmail.com'
+        ];
+    }
+
+    function userDoc(uid) {
+      return get(/databases/$(database)/documents/users/$(uid)).data;
+    }
+
+    function isAdmin() {
+      return isAdminEmail()
+        || (isSignedIn()
+            && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+            && userDoc(request.auth.uid).role == 'admin');
+    }
+
+    // -------- users/{uid} : profile + role --------
+    match /users/{uid} {
+      allow read: if isSignedIn() && (request.auth.uid == uid || isAdmin());
+
+      // First-time self create. Role must match the email allowlist.
+      allow create: if isSignedIn()
+        && request.auth.uid == uid
+        && request.resource.data.uid == uid
+        && request.resource.data.email == request.auth.token.email
+        && (
+             (isAdminEmail() && request.resource.data.role == 'admin')
+             || (!isAdminEmail() && request.resource.data.role == 'user')
+           );
+
+      // Self update: cannot change uid/email; can only flip role to 'admin'
+      // if the email is in the admin allowlist (auto-promote on first sign-in).
+      allow update: if isSignedIn()
+        && request.auth.uid == uid
+        && request.resource.data.uid == resource.data.uid
+        && request.resource.data.email == resource.data.email
+        && (
+             request.resource.data.role == resource.data.role
+             || (isAdminEmail() && request.resource.data.role == 'admin')
+           );
+
+      // Admins can update any user doc (e.g. promote/demote others later).
+      allow update: if isAdmin();
+
+      // No client-side deletes.
+      allow delete: if false;
+    }
+
+    // Default deny everything else.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

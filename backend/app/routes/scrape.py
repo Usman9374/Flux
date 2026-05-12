@@ -11,6 +11,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
+from ..auth import CurrentUser, require_user
 from ..database import get_db
 from ..schemas import LeadOut, ScrapeRequestIn, ScrapeResultOut
 from ..scraper.persist import upsert_leads
@@ -23,13 +24,19 @@ router = APIRouter(prefix="/scrape", tags=["scrape"])
 
 
 @router.post("", response_model=ScrapeResultOut, status_code=status.HTTP_200_OK)
-async def scrape(payload: ScrapeRequestIn, db: Session = Depends(get_db)) -> ScrapeResultOut:
+async def scrape(
+    payload: ScrapeRequestIn,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_user),
+) -> ScrapeResultOut:
     req = ScrapeRequest(
         niche=payload.niche,
         location=payload.location,
         max_results=payload.max_results,
         headless=payload.headless,
         min_quality_score=payload.min_quality_score,
+        require_website=payload.require_website,
+        enrich_websites=payload.enrich_websites,
     )
 
     try:
@@ -42,7 +49,13 @@ async def scrape(payload: ScrapeRequestIn, db: Session = Depends(get_db)) -> Scr
         ) from exc
 
     kept = result["kept"]  # list[ScrapedLead]
-    rows, inserted, updated = upsert_leads(db, kept, niche=payload.niche, location=payload.location)
+    rows, inserted, updated = upsert_leads(
+        db,
+        kept,
+        niche=payload.niche,
+        location=payload.location,
+        owner_uid=user.uid,
+    )
 
     return ScrapeResultOut(
         niche=payload.niche,

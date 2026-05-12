@@ -1,14 +1,16 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../lib/api.js'
-import { Icon } from './Icon.jsx'
+import { Btn } from './UI.jsx'
+import { ProgressBarCircle } from './base/progress-indicators/progress-circles.tsx'
+import { LoadingIndicator } from './application/loading-indicator/loading-indicator.tsx'
 
 const NICHE_SUGGESTIONS = [
   'dental clinic',
-  'chiropractor',
-  'law firm',
   'roofing contractor',
   'med spa',
   'hvac company',
+  'law firm',
+  'chiropractor',
 ]
 
 export default function ScrapeForm({ onResult }) {
@@ -17,15 +19,38 @@ export default function ScrapeForm({ onResult }) {
   const [maxResults, setMaxResults] = useState(20)
   const [minScore, setMinScore] = useState(35)
   const [running, setRunning] = useState(false)
+  const [progress, setProgress] = useState(0)
   const [message, setMessage] = useState(null)
+  const tickRef = useRef(null)
+
+  useEffect(() => {
+    if (!running) {
+      if (tickRef.current) clearInterval(tickRef.current)
+      tickRef.current = null
+      return
+    }
+    setProgress(8)
+    tickRef.current = setInterval(() => {
+      setProgress((p) => {
+        if (p >= 92) return p
+        const remaining = 92 - p
+        return Math.min(92, p + Math.max(0.6, remaining * 0.06))
+      })
+    }, 320)
+    return () => {
+      if (tickRef.current) clearInterval(tickRef.current)
+      tickRef.current = null
+    }
+  }, [running])
 
   const submit = async (e) => {
-    e.preventDefault()
+    e?.preventDefault?.()
     if (!niche.trim() || !location.trim()) {
       setMessage({ type: 'err', text: 'Niche and location are both required.' })
       return
     }
     setRunning(true)
+    setProgress(8)
     setMessage({ type: 'info', text: `Scraping "${niche}" in ${location}…` })
     try {
       const result = await api.scrape({
@@ -34,6 +59,7 @@ export default function ScrapeForm({ onResult }) {
         max_results: Number(maxResults),
         min_quality_score: Number(minScore),
       })
+      setProgress(100)
       setMessage({
         type: 'ok',
         text: `Done · kept ${result.kept_count}/${result.raw_count} · ${result.inserted_count} new, ${result.updated_count} updated.`,
@@ -43,19 +69,18 @@ export default function ScrapeForm({ onResult }) {
       setMessage({ type: 'err', text: err.message || 'Scrape failed.' })
     } finally {
       setRunning(false)
+      setTimeout(() => setProgress(0), 800)
     }
   }
 
   return (
-    <form className="card" onSubmit={submit}>
-      <div className="card-head">
-        <div>
-          <h3>Scrape new leads</h3>
-          <div className="sub">Niche + location → filtered, scored business intelligence.</div>
-        </div>
+    <form onSubmit={submit}>
+      <div className="hero">
+        <h1 className="hero-title">What leads do you need?</h1>
       </div>
-      <div className="card-body">
-        <div className="form-row">
+
+      <div className="prompt-card">
+        <div className="prompt-row">
           <div className="field">
             <label htmlFor="niche">Niche</label>
             <input
@@ -100,7 +125,7 @@ export default function ScrapeForm({ onResult }) {
             />
           </div>
           <div className="field">
-            <label htmlFor="score">Min quality</label>
+            <label htmlFor="score">Min score</label>
             <input
               id="score"
               className="input"
@@ -112,23 +137,54 @@ export default function ScrapeForm({ onResult }) {
               disabled={running}
             />
           </div>
-          <div className="field submit">
-            <label>&nbsp;</label>
-            <button type="submit" className="btn matcha" disabled={running}>
-              <Icon name={running ? 'refresh' : 'scrape'} size={14} />
-              {running ? 'Scraping…' : 'Run scrape'}
-            </button>
-          </div>
         </div>
 
-        {message ? (
-          <div
-            className={`banner mt-12 ${message.type === 'err' ? 'err' : message.type === 'ok' ? 'ok' : ''}`}
+        <div className="prompt-foot">
+          <div style={{ flex: 1 }} />
+          <Btn
+            kind="primary"
+            icon={running ? 'refresh' : 'bolt'}
+            disabled={running}
+            type="submit"
           >
-            {message.text}
-          </div>
-        ) : null}
+            {running ? 'Running scraper…' : 'Generate leads'}
+          </Btn>
+        </div>
       </div>
+
+      {(running || progress > 0) ? (
+        <div className="scrape-progress mt-22">
+          <div className="scrape-progress-circle">
+            <ProgressBarCircle value={Math.round(progress)} size="xxs" />
+          </div>
+          <div className="scrape-progress-meta">
+            <div className="scrape-progress-row">
+              <div className="flux-loading">
+                <LoadingIndicator type="line-spinner" size="sm" />
+              </div>
+              <div className="scrape-progress-text">
+                <strong>Scraping leads</strong>
+                <span>
+                  {niche || 'niche'} · {location || 'location'} · target {maxResults}
+                </span>
+              </div>
+            </div>
+            <div className="scrape-progress-bar" aria-hidden>
+              <div className="scrape-progress-bar-fill" style={{ width: `${Math.round(progress)}%` }} />
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {message && !running ? (
+        <div
+          className={`banner mt-22 ${
+            message.type === 'err' ? 'err' : message.type === 'ok' ? 'ok' : ''
+          }`}
+        >
+          {message.text}
+        </div>
+      ) : null}
     </form>
   )
 }

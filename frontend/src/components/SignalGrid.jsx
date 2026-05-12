@@ -59,9 +59,12 @@ const CANONICAL_SIGNALS = [
 
 const KNOWN_KEYS = new Set(CANONICAL_SIGNALS.map((s) => s.key))
 
-function SignalCard({ on, label, hint, weight }) {
+function SignalCard({ on, label, hint, weight, index }) {
   return (
-    <div className={`signal ${on ? 'on' : 'off'}`}>
+    <div
+      className={`signal ${on ? 'on' : 'off'} signal-enter`}
+      style={{ animationDelay: `${Math.min(index * 50, 600)}ms` }}
+    >
       <div className="signal-mark" aria-hidden>
         <Icon name={on ? 'check' : 'x'} size={12} />
       </div>
@@ -82,15 +85,23 @@ export default function SignalGrid({ signals }) {
 
   return (
     <div className="signal-grid">
-      {CANONICAL_SIGNALS.map((s) => (
-        <SignalCard key={s.key} on={!!map[s.key]} label={s.label} hint={s.hint} weight={s.weight} />
+      {CANONICAL_SIGNALS.map((s, i) => (
+        <SignalCard
+          key={s.key}
+          on={!!map[s.key]}
+          label={s.label}
+          hint={s.hint}
+          weight={s.weight}
+          index={i}
+        />
       ))}
-      {extras.map(([k]) => (
+      {extras.map(([k], i) => (
         <SignalCard
           key={k}
           on
           label={k.replace(/_/g, ' ')}
           hint="Custom signal recorded by the scraper."
+          index={CANONICAL_SIGNALS.length + i}
         />
       ))}
     </div>

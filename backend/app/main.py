@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .auth import init_firebase_admin
 from .config import get_settings
 from .database import Base, engine
 from .migrations import ensure_leads_schema
@@ -18,6 +19,7 @@ async def lifespan(app: FastAPI):
 
     Base.metadata.create_all(bind=engine)
     ensure_leads_schema(engine)
+    init_firebase_admin()
     yield
 
 

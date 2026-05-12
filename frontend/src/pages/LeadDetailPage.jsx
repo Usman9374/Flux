@@ -5,13 +5,15 @@ import { Icon } from '../components/Icon.jsx'
 import QualityScore from '../components/QualityScore.jsx'
 import Rating from '../components/Rating.jsx'
 import SignalGrid from '../components/SignalGrid.jsx'
+import { Btn, Panel, Pill, ScoreRing } from '../components/UI.jsx'
 import { downloadCSV, formatDate, formatRelative, hostname, leadsToCSV } from '../lib/format.js'
 
 function tierLabel(score) {
-  if (score === null || score === undefined) return { label: 'Unscored', tone: 'ghost' }
-  if (score >= 70) return { label: 'High intent', tone: 'ok' }
-  if (score >= 45) return { label: 'Promising', tone: 'matcha' }
-  return { label: 'Cold', tone: 'warn' }
+  if (score === null || score === undefined) return { label: 'UNSCORED', tone: 'default' }
+  if (score >= 80) return { label: 'HIGH INTENT', tone: 'accent' }
+  if (score >= 65) return { label: 'STRONG', tone: 'warm' }
+  if (score >= 45) return { label: 'PROMISING', tone: 'info' }
+  return { label: 'COLD', tone: 'err' }
 }
 
 function CopyButton({ value, label = 'Copy' }) {
@@ -29,9 +31,14 @@ function CopyButton({ value, label = 'Copy' }) {
     }
   }
   return (
-    <button type="button" className="copy-chip" onClick={handle} title={`Copy ${label.toLowerCase()}`}>
-      <Icon name={copied ? 'check' : 'copy'} size={12} />
-      <span>{copied ? 'Copied' : label}</span>
+    <button
+      type="button"
+      className="copy-chip"
+      onClick={handle}
+      title={`Copy ${label.toLowerCase()}`}
+    >
+      <Icon name={copied ? 'check' : 'copy'} size={11} />
+      <span>{copied ? 'COPIED' : label.toUpperCase()}</span>
     </button>
   )
 }
@@ -40,7 +47,7 @@ function DetailRow({ icon, label, value, copy }) {
   return (
     <div className="detail-row">
       <div className="detail-key">
-        {icon ? <Icon name={icon} size={13} /> : null}
+        {icon ? <Icon name={icon} size={12} /> : null}
         <span>{label}</span>
       </div>
       <div className="detail-val">
@@ -59,8 +66,8 @@ function DetailRow({ icon, label, value, copy }) {
 
 function DetailSkeleton() {
   return (
-    <div className="detail-skeleton">
-      <div className="skeleton" style={{ height: 28, width: '40%', marginBottom: 12 }} />
+    <div>
+      <div className="skeleton" style={{ height: 32, width: '40%', marginBottom: 14 }} />
       <div className="skeleton" style={{ height: 14, width: '60%', marginBottom: 8 }} />
       <div className="skeleton" style={{ height: 14, width: '30%' }} />
     </div>
@@ -100,19 +107,17 @@ export default function LeadDetailPage() {
   if (loading) {
     return (
       <>
-        <div className="page-header">
+        <div className="detail-header">
           <div>
             <Link to="/leads" className="back-link">
-              <Icon name="arrow-left" size={12} /> Back to leads
+              <Icon name="arrow-left" size={11} /> Back to leads
             </Link>
-            <h2 style={{ marginTop: 8 }}>Loading lead…</h2>
+            <h2 className="detail-title">Loading lead…</h2>
           </div>
         </div>
-        <div className="card">
-          <div className="card-body">
-            <DetailSkeleton />
-          </div>
-        </div>
+        <Panel>
+          <DetailSkeleton />
+        </Panel>
       </>
     )
   }
@@ -120,30 +125,31 @@ export default function LeadDetailPage() {
   if (notFound) {
     return (
       <>
-        <div className="page-header">
+        <div className="detail-header">
           <div>
             <Link to="/leads" className="back-link">
-              <Icon name="arrow-left" size={12} /> Back to leads
+              <Icon name="arrow-left" size={11} /> Back to leads
             </Link>
-            <h2 style={{ marginTop: 8 }}>Lead not found</h2>
-            <p>The lead with id <span className="mono">{id}</span> doesn’t exist (or was removed).</p>
+            <h2 className="detail-title">Lead not found</h2>
+            <p className="text-mute">
+              The lead with id <span className="mono">#{id}</span> doesn't exist (or was removed).
+            </p>
           </div>
         </div>
-        <div className="card">
-          <div className="card-body">
-            <div className="empty">
-              <div className="title">Nothing to show</div>
-              <div className="hint">
-                Try returning to the leads table — the row may have been merged or replaced by a fresher scrape.
-              </div>
-              <div className="mt-12">
-                <button className="btn matcha" onClick={() => navigate('/leads')}>
-                  Open leads
-                </button>
-              </div>
+        <Panel>
+          <div className="empty">
+            <div className="title">Nothing to show</div>
+            <div className="hint">
+              Try returning to the leads table — the row may have been merged or replaced by a fresher
+              scrape.
+            </div>
+            <div className="mt-12">
+              <Btn kind="primary" onClick={() => navigate('/leads')}>
+                Open leads
+              </Btn>
             </div>
           </div>
-        </div>
+        </Panel>
       </>
     )
   }
@@ -151,12 +157,12 @@ export default function LeadDetailPage() {
   if (error) {
     return (
       <>
-        <div className="page-header">
+        <div className="detail-header">
           <div>
             <Link to="/leads" className="back-link">
-              <Icon name="arrow-left" size={12} /> Back to leads
+              <Icon name="arrow-left" size={11} /> Back to leads
             </Link>
-            <h2 style={{ marginTop: 8 }}>Couldn’t load lead</h2>
+            <h2 className="detail-title">Couldn't load lead</h2>
           </div>
         </div>
         <div className="banner err">{error}</div>
@@ -179,201 +185,238 @@ export default function LeadDetailPage() {
 
   return (
     <>
-      <div className="page-header detail-header">
-        <div>
+      <div className="detail-header">
+        <div style={{ minWidth: 0 }}>
           <Link to="/leads" className="back-link">
-            <Icon name="arrow-left" size={12} /> Back to leads
+            <Icon name="arrow-left" size={11} /> Back to leads
           </Link>
           <h2 className="detail-title">{lead.name}</h2>
           <div className="detail-meta">
-            {lead.niche ? <span className="pill matcha">{lead.niche}</span> : null}
+            <Pill tone={tier.tone} dot>
+              {tier.label}
+            </Pill>
+            {lead.niche ? <Pill>{lead.niche.toUpperCase()}</Pill> : null}
             {lead.location ? (
-              <span className="pill outline">
-                <Icon name="pin" size={11} /> {lead.location}
-              </span>
+              <Pill>
+                <Icon name="pin" size={10} /> {lead.location}
+              </Pill>
             ) : null}
-            <span className="pill ghost">
-              <Icon name="info" size={11} /> Source · {lead.source}
-            </span>
-            <span className="text-mute" style={{ fontSize: 12.5 }}>
+            <Pill>
+              <Icon name="database" size={10} /> {lead.source || 'unknown source'}
+            </Pill>
+            <span className="text-mute mono" style={{ fontSize: 11.5 }}>
               Added {formatRelative(lead.created_at)}
             </span>
           </div>
         </div>
         <div className="page-actions">
           {lead.website ? (
-            <a className="btn primary" href={lead.website} target="_blank" rel="noreferrer">
-              <Icon name="external" size={13} /> Open website
-            </a>
+            <Btn
+              kind="primary"
+              icon="external"
+              as="a"
+              href={lead.website}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Open website
+            </Btn>
           ) : null}
-          <button className="btn" onClick={exportOne}>
-            <Icon name="download" size={13} /> Export CSV
-          </button>
+          <Btn kind="secondary" icon="download" onClick={exportOne}>
+            Export CSV
+          </Btn>
         </div>
       </div>
 
       <div className="detail-grid">
         <div className="detail-col">
-          <div className="card">
-            <div className="card-head">
-              <div>
-                <h3>Lead intelligence</h3>
-                <div className="sub">Composite quality score and the signals that drove it.</div>
-              </div>
-              <span className={`pill ${tier.tone}`}>{tier.label}</span>
-            </div>
-            <div className="card-body">
-              <div className="quality-hero">
-                <div className="quality-hero-num">
-                  {lead.quality_score === null || lead.quality_score === undefined
-                    ? '—'
-                    : lead.quality_score}
-                  <span className="quality-hero-of">/100</span>
-                </div>
-                <div className="quality-hero-bar">
+          <Panel
+            title="Lead intelligence"
+            sub="Composite quality score + the signals that drove it"
+            action={
+              <Pill tone={tier.tone} dot>
+                {tier.label}
+              </Pill>
+            }
+          >
+            <div className="quality-hero">
+              <ScoreRing score={lead.quality_score} size={88} sw={6} />
+              <div className="quality-hero-bar">
+                <div style={{ width: '100%' }}>
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'baseline',
+                      justifyContent: 'space-between',
+                      gap: 12,
+                      marginBottom: 8,
+                    }}
+                  >
+                    <div className="quality-hero-num">
+                      {lead.quality_score === null || lead.quality_score === undefined
+                        ? '—'
+                        : lead.quality_score}
+                      <span className="quality-hero-of">/100</span>
+                    </div>
+                    <Rating value={lead.rating} count={lead.reviews_count} />
+                  </div>
                   <QualityScore value={lead.quality_score} />
                 </div>
-                <p className="quality-hero-note">
-                  Score combines presence of a first-party website, contact channels, location alignment
-                  with the search query, category-niche fit, and reputation strength. Higher scores
-                  indicate leads that are more likely to be reachable and on-target.
-                </p>
               </div>
-
-              <div className="section-divider" />
-
-              <div className="section-head">
-                <h4>
-                  <Icon name="sparkle" size={14} /> Business intelligence signals
-                </h4>
-                <span className="text-mute" style={{ fontSize: 12 }}>
-                  Filled signals contributed to this lead's score.
-                </span>
-              </div>
-              <SignalGrid signals={lead.signals} />
+              <p className="quality-hero-note">
+                Score combines presence of a first-party website, contact channels, location alignment
+                with the search query, category-niche fit, and reputation strength. Higher scores
+                indicate leads that are more reachable and on-target.
+              </p>
             </div>
-          </div>
 
-          <div className="card mt-18">
-            <div className="card-head">
-              <div>
-                <h3>Reputation</h3>
-                <div className="sub">Public-facing rating and review volume.</div>
+            <div className="section-divider" />
+
+            <div className="section-head">
+              <h4>
+                <Icon name="spark" size={13} /> Business intelligence signals
+              </h4>
+              <span
+                className="text-mute"
+                style={{ fontSize: 11.5, fontFamily: 'var(--mono)', fontWeight: 600 }}
+              >
+                Filled signals contributed to the score
+              </span>
+            </div>
+            <SignalGrid signals={lead.signals} />
+          </Panel>
+
+          <Panel
+            title="Reputation"
+            sub="Public-facing rating and review volume"
+          >
+            <div className="reputation">
+              <div className="rep-rating">
+                <Rating value={lead.rating} count={lead.reviews_count} />
+              </div>
+              <div className="rep-meta">
+                {lead.rating !== null && lead.rating !== undefined ? (
+                  <>
+                    <strong>{Number(lead.rating).toFixed(1)} ★</strong> from{' '}
+                    {lead.reviews_count !== null && lead.reviews_count !== undefined
+                      ? `${lead.reviews_count.toLocaleString()} review${
+                          lead.reviews_count === 1 ? '' : 's'
+                        }`
+                      : 'an unknown number of reviews'}
+                    .
+                  </>
+                ) : (
+                  <span className="text-mute">No rating data captured.</span>
+                )}
               </div>
             </div>
-            <div className="card-body">
-              <div className="reputation">
-                <div className="rep-rating">
-                  <Rating value={lead.rating} count={lead.reviews_count} />
-                </div>
-                <div className="rep-meta">
-                  {lead.rating !== null && lead.rating !== undefined ? (
-                    <>
-                      <strong>{Number(lead.rating).toFixed(1)} ★</strong> from{' '}
-                      {lead.reviews_count !== null && lead.reviews_count !== undefined
-                        ? `${lead.reviews_count.toLocaleString()} review${lead.reviews_count === 1 ? '' : 's'}`
-                        : 'an unknown number of reviews'}
-                      .
-                    </>
-                  ) : (
-                    <span className="muted">No rating data captured.</span>
-                  )}
-                </div>
-              </div>
-            </div>
-          </div>
+          </Panel>
         </div>
 
         <div className="detail-col">
-          <div className="card">
-            <div className="card-head">
-              <div>
-                <h3>Contact</h3>
-                <div className="sub">Channels surfaced from public listings.</div>
-              </div>
+          <Panel title="Contact" sub="Channels surfaced from public listings + the company website">
+            <div className="detail-list">
+              <DetailRow
+                icon="globe"
+                label="Website"
+                value={
+                  host ? (
+                    <a href={lead.website} target="_blank" rel="noreferrer" className="ext-link">
+                      {host} <Icon name="external" size={11} />
+                    </a>
+                  ) : null
+                }
+                copy={lead.website}
+              />
+              <DetailRow
+                icon="mail"
+                label="Email"
+                value={
+                  lead.email ? (
+                    <a href={`mailto:${lead.email}`} className="ext-link">
+                      {lead.email}
+                    </a>
+                  ) : null
+                }
+                copy={lead.email}
+              />
+              <DetailRow icon="phone" label="Phone" value={lead.phone} copy={lead.phone} />
+              <DetailRow icon="pin" label="Address" value={lead.address} copy={lead.address} />
+              <DetailRow icon="pin" label="Location" value={lead.location} copy={lead.location} />
+              <DetailRow icon="calendar" label="Hours" value={lead.hours} />
             </div>
-            <div className="card-body">
-              <div className="detail-list">
-                <DetailRow
-                  icon="globe"
-                  label="Website"
-                  value={
-                    host ? (
-                      <a href={lead.website} target="_blank" rel="noreferrer" className="ext-link">
-                        {host} <Icon name="external" size={11} />
-                      </a>
-                    ) : null
-                  }
-                  copy={lead.website}
-                />
-                <DetailRow icon="phone" label="Phone" value={lead.phone} copy={lead.phone} />
-                <DetailRow icon="pin" label="Address" value={lead.address} copy={lead.address} />
-                <DetailRow icon="pin" label="Location" value={lead.location} copy={lead.location} />
-              </div>
-            </div>
-          </div>
+          </Panel>
 
-          <div className="card mt-18">
-            <div className="card-head">
-              <div>
-                <h3>Categorization</h3>
-                <div className="sub">How Flux classified this business.</div>
-              </div>
-            </div>
-            <div className="card-body">
+          {lead.social_links && Object.keys(lead.social_links).length > 0 ? (
+            <Panel title="Social profiles" sub="Linked from the company website">
               <div className="detail-list">
-                <DetailRow icon="tag" label="Niche" value={lead.niche} />
-                <DetailRow icon="tag" label="Category" value={lead.category} />
-              </div>
-            </div>
-          </div>
-
-          <div className="card mt-18">
-            <div className="card-head">
-              <div>
-                <h3>Provenance</h3>
-                <div className="sub">Where this record came from and when it changed.</div>
-              </div>
-            </div>
-            <div className="card-body">
-              <div className="detail-list">
-                <DetailRow icon="info" label="Source" value={lead.source} />
-                <DetailRow
-                  icon="external"
-                  label="Source URL"
-                  value={
-                    sourceHost ? (
-                      <a
-                        href={lead.source_url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="ext-link"
-                      >
-                        {sourceHost} <Icon name="external" size={11} />
+                {Object.entries(lead.social_links).map(([key, url]) => (
+                  <DetailRow
+                    key={key}
+                    icon="external"
+                    label={key.charAt(0).toUpperCase() + key.slice(1)}
+                    value={
+                      <a href={url} target="_blank" rel="noreferrer" className="ext-link">
+                        {hostname(url) || url} <Icon name="external" size={11} />
                       </a>
-                    ) : null
-                  }
-                  copy={lead.source_url}
-                />
-                <DetailRow
-                  icon="calendar"
-                  label="First seen"
-                  value={formatDate(lead.created_at)}
-                />
-                <DetailRow
-                  icon="calendar"
-                  label="Last updated"
-                  value={formatDate(lead.updated_at)}
-                />
-                <DetailRow
-                  icon="info"
-                  label="Internal id"
-                  value={<span className="mono">#{lead.id}</span>}
-                  copy={String(lead.id)}
-                />
+                    }
+                    copy={url}
+                  />
+                ))}
               </div>
+            </Panel>
+          ) : null}
+
+          <Panel title="Categorization" sub="How Flux classified this business">
+            <div className="detail-list">
+              <DetailRow icon="tag" label="Niche" value={lead.niche} />
+              <DetailRow icon="tag" label="Category" value={lead.category} />
+              <DetailRow icon="pin" label="Plus code" value={lead.plus_code} copy={lead.plus_code} />
             </div>
-          </div>
+          </Panel>
+
+          {lead.description ? (
+            <Panel title="About" sub="Pulled from the company's website or Google's editorial summary">
+              <p style={{ margin: 0, lineHeight: 1.55, color: 'var(--text)' }}>
+                {lead.description}
+              </p>
+            </Panel>
+          ) : null}
+
+          <Panel title="Provenance" sub="Where this record came from and when it changed">
+            <div className="detail-list">
+              <DetailRow icon="info" label="Source" value={lead.source} />
+              <DetailRow
+                icon="external"
+                label="Source URL"
+                value={
+                  sourceHost ? (
+                    <a
+                      href={lead.source_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="ext-link"
+                    >
+                      {sourceHost} <Icon name="external" size={11} />
+                    </a>
+                  ) : null
+                }
+                copy={lead.source_url}
+              />
+              <DetailRow icon="calendar" label="First seen" value={formatDate(lead.created_at)} />
+              <DetailRow
+                icon="calendar"
+                label="Last updated"
+                value={formatDate(lead.updated_at)}
+              />
+              <DetailRow
+                icon="info"
+                label="Internal id"
+                value={<span className="mono">#{lead.id}</span>}
+                copy={String(lead.id)}
+              />
+            </div>
+          </Panel>
         </div>
       </div>
     </>

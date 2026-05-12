@@ -3,7 +3,7 @@ export default function QualityScore({ value }) {
     return <span className="muted">—</span>
   }
   const v = Math.max(0, Math.min(100, Number(value)))
-  const tier = v >= 70 ? 'high' : v >= 45 ? '' : 'low'
+  const tier = v >= 70 ? 'high' : v >= 45 ? 'mid' : 'low'
   return (
     <div className="quality" title={`Quality score: ${v}/100`}>
       <div className="track">

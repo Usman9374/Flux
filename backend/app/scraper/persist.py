@@ -19,17 +19,25 @@ from .types import ScrapedLead
 log = logging.getLogger(__name__)
 
 
-def _row_from_scraped(lead: ScrapedLead, niche_default: str, location_default: str) -> dict:
+def _row_from_scraped(
+    lead: ScrapedLead, niche_default: str, location_default: str, owner_uid: str | None
+) -> dict:
     return {
+        "owner_uid": owner_uid,
         "name": (lead.name or "").strip(),
         "website": lead.website,
         "phone": lead.phone,
+        "email": lead.email,
         "address": lead.address,
         "location": lead.location or location_default,
         "niche": lead.niche or niche_default,
         "category": lead.category,
+        "description": lead.description,
+        "hours": lead.hours,
+        "plus_code": lead.plus_code,
         "rating": lead.rating,
         "reviews_count": lead.reviews,
+        "social_links": lead.social_links or {},
         "source": lead.source or "google_maps",
         "source_url": lead.source_url,
         "quality_score": lead.quality_score,
@@ -42,6 +50,7 @@ def upsert_leads(
     leads: list[ScrapedLead],
     niche: str,
     location: str,
+    owner_uid: str | None,
 ) -> tuple[list[Lead], int, int]:
     """Insert-or-update each lead. Returns (rows, inserted_count, updated_count).
 
@@ -52,17 +61,22 @@ def upsert_leads(
     if not leads:
         return [], 0, 0
 
-    rows = [_row_from_scraped(l, niche, location) for l in leads]
+    rows = [_row_from_scraped(l, niche, location, owner_uid) for l in leads]
 
     stmt = pg_insert(Lead).values(rows)
     update_cols = {
         "website": stmt.excluded.website,
         "phone": stmt.excluded.phone,
+        "email": stmt.excluded.email,
         "address": stmt.excluded.address,
         "niche": stmt.excluded.niche,
         "category": stmt.excluded.category,
+        "description": stmt.excluded.description,
+        "hours": stmt.excluded.hours,
+        "plus_code": stmt.excluded.plus_code,
         "rating": stmt.excluded.rating,
         "reviews_count": stmt.excluded.reviews_count,
+        "social_links": stmt.excluded.social_links,
         "source_url": stmt.excluded.source_url,
         "quality_score": stmt.excluded.quality_score,
         "signals": stmt.excluded.signals,
@@ -70,6 +84,7 @@ def upsert_leads(
     }
     stmt = stmt.on_conflict_do_update(
         index_elements=[
+            func.coalesce(Lead.owner_uid, ""),
             func.lower(Lead.name),
             func.lower(func.coalesce(Lead.location, "")),
             Lead.source,

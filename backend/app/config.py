@@ -16,6 +16,13 @@ class Settings(BaseSettings):
     # in production. Never hardcoded — keeps secrets out of the repo.
     database_url: str = Field(..., alias="DATABASE_URL")
 
+    # Firebase Admin SDK service account JSON, as the raw JSON string. Get it
+    # from Firebase Console -> Project settings -> Service accounts -> Generate
+    # new private key. Required for any authenticated route.
+    firebase_service_account_json: str | None = Field(
+        default=None, alias="FIREBASE_SERVICE_ACCOUNT_JSON"
+    )
+
     # Stored as a raw string so a comma-separated env value parses cleanly.
     # Public access goes through the .cors_origins property below.
     cors_origins_raw: str = Field(

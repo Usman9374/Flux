@@ -13,7 +13,7 @@ from typing import TypeVar
 # (runtime) agree on a path. setdefault preserves any explicit override.
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/opt/render/project/src/.playwright")
 
-from playwright.async_api import BrowserContext, async_playwright  # noqa: E402
+from playwright.async_api import BrowserContext, Route, async_playwright  # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -22,18 +22,58 @@ DEFAULT_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
 )
 
+# Resource types we never need for scraping data. Blocking these cuts
+# Google Maps page weight by ~80% and shaves seconds off every nav.
+BLOCKED_RESOURCE_TYPES = {"image", "media", "font", "stylesheet"}
+
+# Tracker / analytics hosts that load on every Maps page and slow it down
+# without contributing anything to the data we extract.
+BLOCKED_HOSTS = (
+    "doubleclick.net",
+    "googlesyndication.com",
+    "googletagmanager.com",
+    "google-analytics.com",
+    "googleadservices.com",
+    "facebook.net",
+    "facebook.com/tr",
+)
+
 T = TypeVar("T")
 
 
+async def _block_heavy_assets(route: Route) -> None:
+    req = route.request
+    if req.resource_type in BLOCKED_RESOURCE_TYPES:
+        await route.abort()
+        return
+    url = req.url
+    if any(h in url for h in BLOCKED_HOSTS):
+        await route.abort()
+        return
+    await route.continue_()
+
+
 @asynccontextmanager
-async def browser_context(headless: bool = True) -> AsyncIterator[BrowserContext]:
-    """Yield a configured Playwright browser context. Always cleans up."""
+async def browser_context(
+    headless: bool = True,
+    *,
+    block_assets: bool = True,
+) -> AsyncIterator[BrowserContext]:
+    """Yield a configured Playwright browser context. Always cleans up.
+
+    `block_assets=True` aborts requests for images/fonts/css/media and known
+    tracker hosts. Cuts page weight enormously and is the single biggest
+    speedup for a scrape pass — leave it on unless you specifically need
+    rendered visuals.
+    """
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=headless,
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--disable-features=IsolateOrigins,site-per-process",
+                "--disable-dev-shm-usage",
+                "--no-sandbox",
             ],
         )
         context = await browser.new_context(
@@ -46,6 +86,8 @@ async def browser_context(headless: bool = True) -> AsyncIterator[BrowserContext
         await context.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
         )
+        if block_assets:
+            await context.route("**/*", _block_heavy_assets)
         try:
             yield context
         finally:

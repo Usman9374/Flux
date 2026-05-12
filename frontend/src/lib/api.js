@@ -1,6 +1,15 @@
+import { auth } from './firebase.js'
+
 const API_BASE = import.meta.env.VITE_API_BASE || '/api'
 
-async function request(path, { method = 'GET', body, signal, params } = {}) {
+async function authHeader() {
+  const user = auth.currentUser
+  if (!user) return null
+  const token = await user.getIdToken()
+  return token ? `Bearer ${token}` : null
+}
+
+async function request(path, { method = 'GET', body, signal, params, auth: needsAuth = true } = {}) {
   let url = `${API_BASE}${path}`
   if (params) {
     const qs = new URLSearchParams()
@@ -12,10 +21,17 @@ async function request(path, { method = 'GET', body, signal, params } = {}) {
     if (s) url += `?${s}`
   }
 
+  const headers = {}
+  if (body) headers['Content-Type'] = 'application/json'
+  if (needsAuth) {
+    const ah = await authHeader()
+    if (ah) headers['Authorization'] = ah
+  }
+
   const res = await fetch(url, {
     method,
     signal,
-    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   })
 
@@ -26,14 +42,16 @@ async function request(path, { method = 'GET', body, signal, params } = {}) {
     const detail =
       (data && typeof data === 'object' && (data.detail || data.message)) ||
       (typeof data === 'string' ? data : `HTTP ${res.status}`)
-    throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail))
+    const err = new Error(typeof detail === 'string' ? detail : JSON.stringify(detail))
+    err.status = res.status
+    throw err
   }
 
   return data
 }
 
 export const api = {
-  health: (signal) => request('/health', { signal }),
+  health: (signal) => request('/health', { signal, auth: false }),
   listLeads: (params, signal) => request('/leads', { params, signal }),
   getLead: (id, signal) => request(`/leads/${id}`, { signal }),
   scrape: (body, signal) => request('/scrape', { method: 'POST', body, signal }),

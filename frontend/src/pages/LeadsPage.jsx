@@ -3,7 +3,14 @@ import { useNavigate } from 'react-router-dom'
 import { api } from '../lib/api.js'
 import LeadsTable from '../components/LeadsTable.jsx'
 import { Icon } from '../components/Icon.jsx'
+import { Btn, Pill } from '../components/UI.jsx'
 import { downloadCSV, leadsToCSV } from '../lib/format.js'
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupInput,
+} from '../components/ui/input-group.jsx'
+import { LoadingIndicator } from '../components/application/loading-indicator/loading-indicator.tsx'
 
 const PAGE_SIZE = 25
 
@@ -12,7 +19,8 @@ export default function LeadsPage() {
   const [niche, setNiche] = useState('')
   const [location, setLocation] = useState('')
   const [minScore, setMinScore] = useState('')
-  const [sort, setSort] = useState('newest')
+  const [search, setSearch] = useState('')
+  const [sorting, setSorting] = useState([{ id: 'added', desc: true }])
   const [page, setPage] = useState(0)
 
   const [items, setItems] = useState([])
@@ -45,29 +53,11 @@ export default function LeadsPage() {
     return () => ctrl.abort()
   }, [niche, location, page])
 
-  const filtered = useMemo(() => {
+  const filteredByMinScore = useMemo(() => {
     const min = minScore === '' ? null : Number(minScore)
-    let arr = items
-    if (min !== null && !Number.isNaN(min)) {
-      arr = arr.filter((l) => (l.quality_score ?? 0) >= min)
-    }
-    const cmp = (a, b) => {
-      switch (sort) {
-        case 'oldest':
-          return new Date(a.created_at) - new Date(b.created_at)
-        case 'quality':
-          return (b.quality_score ?? -1) - (a.quality_score ?? -1)
-        case 'rating':
-          return (b.rating ?? -1) - (a.rating ?? -1)
-        case 'name':
-          return (a.name || '').localeCompare(b.name || '')
-        case 'newest':
-        default:
-          return new Date(b.created_at) - new Date(a.created_at)
-      }
-    }
-    return [...arr].sort(cmp)
-  }, [items, minScore, sort])
+    if (min === null || Number.isNaN(min)) return items
+    return items.filter((l) => (l.quality_score ?? 0) >= min)
+  }, [items, minScore])
 
   const totalPages = Math.max(1, Math.ceil(count / PAGE_SIZE))
 
@@ -75,7 +65,8 @@ export default function LeadsPage() {
     setNiche('')
     setLocation('')
     setMinScore('')
-    setSort('newest')
+    setSearch('')
+    setSorting([{ id: 'added', desc: true }])
     setPage(0)
   }
 
@@ -94,131 +85,161 @@ export default function LeadsPage() {
     }
   }
 
+  const hasFilters = niche || location || minScore || search
+
   return (
     <>
-      <div className="page-header">
-        <div>
-          <h2>Leads</h2>
-          <p>Search, filter, and export the structured business intelligence Flux has captured.</p>
-        </div>
-        <div className="page-actions">
-          <button className="btn" onClick={exportCSV} disabled={loading || filtered.length === 0}>
-            <Icon name="download" size={14} /> Export CSV
-          </button>
-        </div>
-      </div>
+      {error ? <div className="banner err mb-18">{error}</div> : null}
 
-      {error ? <div className="banner err" style={{ marginBottom: 18 }}>{error}</div> : null}
+      <section className="panel">
+        <div className="filter-bar">
+          <Pill tone="accent" dot>
+            {count.toLocaleString()} LEADS
+          </Pill>
+          <span
+            className="text-mute"
+            style={{
+              fontSize: 11.5,
+              fontFamily: 'var(--mono)',
+              fontWeight: 600,
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 8,
+            }}
+          >
+            {loading ? (
+              <span className="flux-loading inline-loading" aria-hidden>
+                <LoadingIndicator type="line-spinner" size="sm" />
+              </span>
+            ) : null}
+            {loading ? 'Syncing…' : `${filteredByMinScore.length} on this page`}
+          </span>
 
-      <div className="card">
-        <div className="filters">
-          <div className="field">
-            <label htmlFor="f-niche">Niche</label>
+          <div className="grow" />
+
+          <div className="lead-search">
+            <InputGroup>
+              <InputGroupAddon>
+                <Icon name="search" size={14} />
+              </InputGroupAddon>
+              <InputGroupInput
+                placeholder="Search name, website, niche…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+            </InputGroup>
+          </div>
+
+          <label className="filter-input">
+            <Icon name="tag" size={12} />
+            <span className="label">Niche</span>
             <input
-              id="f-niche"
-              className="input"
-              placeholder="e.g. dental clinic"
+              type="text"
+              placeholder="any"
               value={niche}
               onChange={(e) => {
                 setNiche(e.target.value)
                 setPage(0)
               }}
             />
-          </div>
-          <div className="field">
-            <label htmlFor="f-loc">Location</label>
+          </label>
+
+          <label className="filter-input">
+            <Icon name="pin" size={12} />
+            <span className="label">Location</span>
             <input
-              id="f-loc"
-              className="input"
-              placeholder="e.g. Portland"
+              type="text"
+              placeholder="any"
               value={location}
               onChange={(e) => {
                 setLocation(e.target.value)
                 setPage(0)
               }}
             />
-          </div>
-          <div className="field">
-            <label htmlFor="f-score">Min quality</label>
+          </label>
+
+          <label className="filter-input">
+            <Icon name="shield" size={12} />
+            <span className="label">Min</span>
             <input
-              id="f-score"
-              className="input"
               type="number"
               min={0}
               max={100}
-              placeholder="0–100"
+              placeholder="0"
               value={minScore}
               onChange={(e) => setMinScore(e.target.value)}
+              style={{ width: 50 }}
             />
-          </div>
-          <div className="field">
-            <label htmlFor="f-sort">Sort by</label>
-            <select
-              id="f-sort"
-              className="select"
-              value={sort}
-              onChange={(e) => setSort(e.target.value)}
-            >
-              <option value="newest">Newest</option>
-              <option value="oldest">Oldest</option>
-              <option value="quality">Quality (high → low)</option>
-              <option value="rating">Rating (high → low)</option>
-              <option value="name">Name (A → Z)</option>
-            </select>
-          </div>
-          <div className="field">
-            <label>&nbsp;</label>
-            <button className="btn ghost" onClick={reset} type="button">
+          </label>
+
+          {hasFilters ? (
+            <Btn kind="ghost" sm icon="x" onClick={reset}>
               Reset
-            </button>
-          </div>
+            </Btn>
+          ) : null}
+
+          <div className="divider-v" />
+
+          <Btn
+            kind="outline"
+            sm
+            icon="download"
+            onClick={exportCSV}
+            disabled={loading || filteredByMinScore.length === 0}
+          >
+            Export
+          </Btn>
         </div>
 
-        <div className="card-body tight">
+        <div className="panel-body tight">
           <LeadsTable
-            leads={filtered}
+            leads={filteredByMinScore}
             loading={loading}
             onRowClick={(lead) => navigate(`/leads/${lead.id}`)}
-            emptyTitle={
-              niche || location || minScore
-                ? 'No leads match these filters'
-                : 'No leads yet'
-            }
+            globalFilter={search}
+            onGlobalFilterChange={setSearch}
+            sorting={sorting}
+            onSortingChange={setSorting}
+            emptyTitle={hasFilters ? 'No leads match these filters' : 'No leads yet'}
             emptyHint={
-              niche || location || minScore
-                ? 'Try widening your filters or running a new scrape from the dashboard.'
+              hasFilters
+                ? 'Try widening your filters or running a fresh scrape from the dashboard.'
                 : 'Run a scrape from the dashboard to start populating the pipeline.'
             }
           />
         </div>
 
-        <div className="card-foot">
-          <div className="info">
+        <div className="panel-foot">
+          <div>
             {loading
               ? 'Loading…'
-              : `Showing ${filtered.length} of ${count} matching lead${count === 1 ? '' : 's'}`}
+              : `Showing ${filteredByMinScore.length} of ${count} matching lead${count === 1 ? '' : 's'}`}
           </div>
           <div className="pagination">
-            <button
-              className="btn sm"
+            <Btn
+              kind="outline"
+              sm
+              icon="arrow-left"
               disabled={page === 0 || loading}
               onClick={() => setPage((p) => Math.max(0, p - 1))}
             >
-              <Icon name="arrow-left" size={12} /> Prev
-            </button>
+              Prev
+            </Btn>
             <span className="info">
               Page {page + 1} / {totalPages}
             </span>
-            <button
-              className="btn sm"
+            <Btn
+              kind="outline"
+              sm
+              icon="arrow-right"
               disabled={page + 1 >= totalPages || loading}
               onClick={() => setPage((p) => p + 1)}
             >
-              Next <Icon name="arrow-right" size={12} />
-            </button>
+              Next
+            </Btn>
           </div>
         </div>
-      </div>
+      </section>
     </>
   )
 }

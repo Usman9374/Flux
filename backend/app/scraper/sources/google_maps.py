@@ -3,7 +3,16 @@
 Defensive against selector drift: every extraction step has a fallback and
 returns whatever it can. We never crash the whole run because one card
 failed to parse.
+
+Performance notes:
+- Static assets (images/fonts/css) are blocked at the context level — see
+  engine.BLOCKED_RESOURCE_TYPES — so every page navigation is several
+  seconds faster than a normal browser load.
+- Detail enrichment runs in parallel across multiple pages bounded by
+  `_DETAIL_CONCURRENCY`. The previous sequential loop was the dominant
+  bottleneck (≈2–3s per lead × N).
 """
+import asyncio
 import logging
 import re
 from urllib.parse import quote_plus
@@ -17,6 +26,10 @@ from ..types import ScrapedLead
 log = logging.getLogger(__name__)
 
 GMAPS_BASE = "https://www.google.com/maps/search/"
+
+# How many detail pages we open in parallel. Google tolerates a handful from
+# a single context; raising this further trades stability for marginal speed.
+_DETAIL_CONCURRENCY = 5
 
 # JS that reads listing cards and pulls structured data straight from the DOM.
 # Keeps work in the page and avoids 20+ Playwright round-trips per result.
@@ -108,7 +121,7 @@ async def _scroll_feed(page: Page, max_results: int) -> None:
             await feed.evaluate("(el) => el.scrollBy(0, el.clientHeight)")
         except Exception:  # noqa: BLE001
             return
-        await polite_sleep(1.0, 2.0)
+        await polite_sleep(0.4, 0.9)
 
 
 async def _extract_detail(page: Page, listing_url: str) -> dict[str, str | None]:
@@ -118,7 +131,12 @@ async def _extract_detail(page: Page, listing_url: str) -> dict[str, str | None]
     except Exception as e:  # noqa: BLE001
         log.debug("detail nav failed for %s: %s", listing_url, e)
         return detail
-    await polite_sleep(0.6, 1.2)
+
+    # Wait for the detail panel header (business name h1) to appear.
+    try:
+        await page.locator('h1').first.wait_for(timeout=5000)
+    except Exception:  # noqa: BLE001
+        pass
 
     # Website
     try:
@@ -150,7 +168,73 @@ async def _extract_detail(page: Page, listing_url: str) -> dict[str, str | None]
     except Exception:  # noqa: BLE001
         pass
 
+    # Plus code (Google's geo-shorthand — handy as a stable location key)
+    try:
+        plus = page.locator('button[data-item-id="oloc"]')
+        if await plus.count() > 0:
+            label = await plus.first.get_attribute("aria-label") or ""
+            detail["plus_code"] = label.split(":", 1)[1].strip() if ":" in label else label.strip()
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Hours — collapsed text on the listing panel ("Open · Closes 6 PM" style).
+    try:
+        hours = page.locator('div[aria-label*="Hours"]').first
+        if await hours.count() > 0:
+            text = (await hours.inner_text()) or ""
+            text = " ".join(text.split())
+            if text:
+                detail["hours"] = text[:300]
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Description / editorial summary — Google's own short blurb when present.
+    try:
+        desc = page.locator('div.PYvSYb, div[jsaction*="description"]').first
+        if await desc.count() > 0:
+            text = (await desc.inner_text()) or ""
+            text = " ".join(text.split())
+            if text and len(text) > 12:
+                detail["description"] = text[:600]
+    except Exception:  # noqa: BLE001
+        pass
+
     return detail
+
+
+async def _enrich_concurrent(
+    context: BrowserContext,
+    cards: list[dict],
+    enrich_top_n: int,
+) -> dict[int, dict[str, str | None]]:
+    """Run _extract_detail across multiple pages in parallel.
+
+    Returns {card_index: detail_dict}. Failed cards are simply absent.
+    """
+    targets = [(i, c["href"]) for i, c in enumerate(cards) if c.get("href") and i < enrich_top_n]
+    if not targets:
+        return {}
+
+    sem = asyncio.Semaphore(_DETAIL_CONCURRENCY)
+    results: dict[int, dict[str, str | None]] = {}
+
+    async def worker(idx: int, href: str) -> None:
+        async with sem:
+            page = await context.new_page()
+            try:
+                detail = await _extract_detail(page, href)
+                if detail:
+                    results[idx] = detail
+            except Exception as e:  # noqa: BLE001
+                log.debug("detail worker failed for idx=%d: %s", idx, e)
+            finally:
+                try:
+                    await page.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+    await asyncio.gather(*(worker(i, h) for i, h in targets), return_exceptions=True)
+    return results
 
 
 async def scrape(
@@ -163,9 +247,10 @@ async def scrape(
 ) -> list[ScrapedLead]:
     """Search Google Maps for `niche in location` and return up to max_results leads.
 
-    The first pass extracts what's visible on the result cards (fast).
-    The second pass (`enrich_top_n`) clicks into each detail panel to grab
-    website/phone/full-address — costly, so capped.
+    Pass 1: scroll the feed and pull structured card data via a single JS
+    evaluation (fast — no per-card round-trip).
+    Pass 2: open each detail panel concurrently to extract website, phone,
+    full address, plus_code, hours, and description.
     """
     if enrich_top_n is None:
         enrich_top_n = max_results
@@ -177,36 +262,37 @@ async def scrape(
         log.info("Navigating: %s", url)
         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
         await _accept_consent(page)
-        await polite_sleep(1.0, 2.0)
+        await polite_sleep(0.5, 1.0)
 
         await _scroll_feed(page, max_results)
         cards = await page.evaluate(_CARDS_JS)
         cards = [c for c in cards if c.get("name")][:max_results]
         log.info("Extracted %d cards from feed", len(cards))
-
-        leads: list[ScrapedLead] = []
-        for i, card in enumerate(cards):
-            href = card.get("href")
-            detail: dict[str, str | None] = {}
-            if href and i < enrich_top_n:
-                detail = await _extract_detail(page, href)
-                await polite_sleep(0.8, 1.6)
-
-            leads.append(
-                ScrapedLead(
-                    name=(card.get("name") or "").strip(),
-                    website=detail.get("website"),
-                    phone=detail.get("phone") or card.get("phoneSnippet"),
-                    address=detail.get("address") or card.get("addressSnippet"),
-                    location=location,
-                    niche=niche,
-                    category=card.get("category"),
-                    rating=card.get("rating"),
-                    reviews=card.get("reviews"),
-                    source="google_maps",
-                    source_url=href,
-                )
-            )
-        return leads
     finally:
         await page.close()
+
+    details = await _enrich_concurrent(context, cards, enrich_top_n)
+    log.info("Enriched %d/%d details concurrently", len(details), min(len(cards), enrich_top_n))
+
+    leads: list[ScrapedLead] = []
+    for i, card in enumerate(cards):
+        detail = details.get(i, {})
+        leads.append(
+            ScrapedLead(
+                name=(card.get("name") or "").strip(),
+                website=detail.get("website"),
+                phone=detail.get("phone") or card.get("phoneSnippet"),
+                address=detail.get("address") or card.get("addressSnippet"),
+                location=location,
+                niche=niche,
+                category=card.get("category"),
+                description=detail.get("description"),
+                hours=detail.get("hours"),
+                plus_code=detail.get("plus_code"),
+                rating=card.get("rating"),
+                reviews=card.get("reviews"),
+                source="google_maps",
+                source_url=card.get("href"),
+            )
+        )
+    return leads

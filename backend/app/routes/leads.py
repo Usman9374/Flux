@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from ..auth import CurrentUser, require_user
 from ..database import get_db
 from ..models import Lead
 from ..schemas import LeadCreate, LeadList, LeadOut
@@ -12,12 +13,15 @@ router = APIRouter(prefix="/leads", tags=["leads"])
 @router.get("", response_model=LeadList)
 def list_leads(
     db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_user),
     niche: str | None = Query(default=None, description="Filter by niche (case-insensitive contains)."),
     location: str | None = Query(default=None, description="Filter by location (case-insensitive contains)."),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ):
     filters = []
+    if not user.is_admin:
+        filters.append(Lead.owner_uid == user.uid)
     if niche:
         filters.append(Lead.niche.ilike(f"%{niche}%"))
     if location:
@@ -35,16 +39,27 @@ def list_leads(
 
 
 @router.get("/{lead_id}", response_model=LeadOut)
-def get_lead(lead_id: int, db: Session = Depends(get_db)):
+def get_lead(
+    lead_id: int,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_user),
+):
     lead = db.get(Lead, lead_id)
     if lead is None:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    if not user.is_admin and lead.owner_uid != user.uid:
+        # Return 404 instead of 403 so we don't leak existence to other users.
         raise HTTPException(status_code=404, detail="Lead not found")
     return lead
 
 
 @router.post("", response_model=LeadOut, status_code=status.HTTP_201_CREATED)
-def create_lead(payload: LeadCreate, db: Session = Depends(get_db)):
-    lead = Lead(**payload.model_dump())
+def create_lead(
+    payload: LeadCreate,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_user),
+):
+    lead = Lead(**payload.model_dump(), owner_uid=user.uid)
     db.add(lead)
     db.commit()
     db.refresh(lead)

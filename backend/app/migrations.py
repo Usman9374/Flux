@@ -19,14 +19,20 @@ log = logging.getLogger(__name__)
 # (column_name, postgres_type, default_clause_or_None)
 _LEADS_COLUMNS: list[tuple[str, str, str | None]] = [
     ("phone", "varchar(64)", None),
+    ("email", "varchar(255)", None),
     ("address", "text", None),
     ("category", "varchar(255)", None),
+    ("description", "text", None),
+    ("hours", "text", None),
+    ("plus_code", "varchar(64)", None),
     ("rating", "double precision", None),
     ("reviews_count", "integer", None),
+    ("social_links", "jsonb", None),
     ("source", "varchar(64)", "DEFAULT 'google_maps' NOT NULL"),
     ("source_url", "text", None),
     ("signals", "jsonb", None),
     ("updated_at", "timestamptz", "DEFAULT now() NOT NULL"),
+    ("owner_uid", "varchar(128)", None),
 ]
 
 
@@ -47,13 +53,15 @@ def ensure_leads_schema(engine: Engine) -> None:
             log.info("migration: %s", stmt)
             conn.execute(text(stmt))
 
-        # Dedupe index — same business in same city from same source = one row.
+        # Replace the legacy global-dedupe index with a per-owner one. Two
+        # users scraping the same business should each get their own row.
+        conn.execute(text("DROP INDEX IF EXISTS ux_leads_name_location_source"))
         conn.execute(text(
-            "CREATE UNIQUE INDEX IF NOT EXISTS ux_leads_name_location_source "
-            "ON leads (lower(name), lower(coalesce(location, '')), source)"
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_leads_owner_name_location_source "
+            "ON leads (coalesce(owner_uid, ''), lower(name), lower(coalesce(location, '')), source)"
         ))
         # Helpful single-column indexes for filtering (idempotent).
-        for col in ("location", "niche", "quality_score"):
+        for col in ("location", "niche", "quality_score", "owner_uid"):
             conn.execute(text(
                 f"CREATE INDEX IF NOT EXISTS ix_leads_{col} ON leads ({col})"
             ))
