@@ -44,7 +44,10 @@ export function useAuth() {
         return
       }
       try {
-        const p = await ensureUserProfile(u)
+        const timeout = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Firestore profile lookup timed out')), 3000),
+        )
+        const p = await Promise.race([ensureUserProfile(u), timeout])
         if (!cancelled) setProfile(p)
       } catch (err) {
         if (!cancelled) {
