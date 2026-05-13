@@ -11,7 +11,7 @@ here is the bits that *will* break if we're sloppy in code review:
 from __future__ import annotations
 
 from app.scraper.niche_taxonomy import match_niche
-from app.scraper.sources.osm import _build_overpass_ql, _parse_elements
+from app.scraper.sources.osm import _build_overpass_ql, _clamp_bbox, _parse_elements
 
 
 def test_build_overpass_ql_uses_taxonomy_tags():
@@ -104,6 +104,28 @@ def test_parse_elements_normalizes_bare_domain_website():
         elements, niche_match=match_niche("bakery"), niche_text="bakery", location="X"
     )
     assert leads[0].website == "https://example.com"
+
+
+def test_clamp_bbox_passes_through_small_areas():
+    """An Islamabad-sized bbox (~30km) is fine — leave alone."""
+    bbox = (33.55, 33.85, 72.95, 73.25)
+    new, clamped = _clamp_bbox(bbox, 33.7, 73.1)
+    assert clamped is False
+    assert new == bbox
+
+
+def test_clamp_bbox_shrinks_state_sized_areas():
+    """California-sized bbox MUST be clamped or Overpass times out."""
+    bbox = (32.5, 42.0, -124.5, -114.0)  # California
+    centroid_lat, centroid_lon = 36.7783, -119.4179
+    new, clamped = _clamp_bbox(bbox, centroid_lat, centroid_lon)
+    assert clamped is True
+    south, north, west, east = new
+    assert (north - south) <= 1.0  # ~110 km tall
+    assert (east - west) <= 1.0
+    # Centred on the centroid, not the original south/west corners.
+    assert abs((south + north) / 2 - centroid_lat) < 0.01
+    assert abs((west + east) / 2 - centroid_lon) < 0.01
 
 
 def test_parse_elements_handles_partial_address():

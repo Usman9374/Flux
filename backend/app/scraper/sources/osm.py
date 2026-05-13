@@ -78,6 +78,40 @@ class Geocoded:
     country_code: str | None
 
 
+# Maximum half-extent in degrees we'll send to Overpass. ~0.45° latitude is
+# roughly 50 km. State / country queries (e.g. "California") otherwise hit
+# Overpass with a 1000 km diagonal box, which times out and returns empty —
+# the user sees "0 leads" with no explanation. Clamping to 50 km around the
+# centroid trades coverage for actually-finishing.
+_MAX_HALF_DEGREES = 0.45
+
+
+def _clamp_bbox(
+    bbox: tuple[float, float, float, float],
+    lat: float,
+    lon: float,
+) -> tuple[tuple[float, float, float, float], bool]:
+    """Cap the bbox to ±_MAX_HALF_DEGREES around (lat, lon).
+
+    Returns (clamped_bbox, was_clamped). The flag lets the caller log /
+    surface a "showing area near {display_name}" hint to the user.
+    """
+    south, north, west, east = bbox
+    needs_clamp = (
+        (north - south) > 2 * _MAX_HALF_DEGREES
+        or (east - west) > 2 * _MAX_HALF_DEGREES
+    )
+    if not needs_clamp:
+        return bbox, False
+    new = (
+        max(south, lat - _MAX_HALF_DEGREES),
+        min(north, lat + _MAX_HALF_DEGREES),
+        max(west, lon - _MAX_HALF_DEGREES),
+        min(east, lon + _MAX_HALF_DEGREES),
+    )
+    return new, True
+
+
 # ---------- Nominatim ----------
 
 
@@ -372,11 +406,18 @@ async def search(
         return []
 
     niche_match = match_niche(niche)
-    ql = _build_overpass_ql(niche_match, niche, geocoded.bbox)
-    log.info("overpass query: niche=%r tags=%s bbox=%s",
+    bbox, was_clamped = _clamp_bbox(geocoded.bbox, geocoded.lat, geocoded.lon)
+    if was_clamped:
+        log.info(
+            "osm: clamped bbox for %r — original %s too large, using ~50km around centroid %s",
+            location, geocoded.bbox, (geocoded.lat, geocoded.lon),
+        )
+    ql = _build_overpass_ql(niche_match, niche, bbox)
+    log.info("overpass query: niche=%r tags=%s bbox=%s%s",
              niche,
              [f"{k}={v}" for k, v in (niche_match.tags if niche_match else [])] or "name~",
-             geocoded.bbox)
+             bbox,
+             " (clamped)" if was_clamped else "")
 
     async with _overpass_lock:
         data = await _overpass_post(client, ql)
@@ -387,6 +428,9 @@ async def search(
     leads = _parse_elements(
         elements, niche_match=niche_match, niche_text=niche, location=location
     )
+    if was_clamped:
+        for l in leads:
+            l.signals = {**(l.signals or {}), "bbox_clamped": True}
     leads = leads[:limit]
     _cache[cache_key] = (now, list(leads))
     log.info("osm: %d leads (%d raw elements)", len(leads), len(elements))

@@ -256,6 +256,7 @@ async def run_scrape(
     dropped.extend(dropped_low)
 
     relaxed = False
+    intent_overridden = False
     if not kept and len(raw) > 0:
         # Floor: don't return empty when raw cards exist. Drop the threshold,
         # then if still empty fall back to top-N by raw signal strength.
@@ -271,6 +272,38 @@ async def run_scrape(
             await on_progress("relaxing_filter", {
                 "progress": 0.92,
                 "message": f"No top-tier leads — showing best available ({len(kept)}).",
+                "relaxed_filter": True,
+            })
+
+    # ---- Stage 6b: offline-mode escape hatch ----
+    # If the user asked for "without website" and the strict filter killed
+    # every candidate (common for queries where most businesses do have
+    # websites — restaurants, dental, etc.), automatically retry as online
+    # mode so the user gets *something* useful instead of "0 leads".
+    # `intent_overridden=True` is surfaced so the UI can label the result
+    # honestly: "no offline-only leads found, showing all matches".
+    if not kept and not require_website and len(raw) > 0:
+        log.info("offline mode returned 0 — auto-retrying in online mode for visibility")
+        kept_online, dropped_online = filter_and_score(
+            survivors, min_score=0, require_website=True,
+        )
+        if not kept_online:
+            kept_online = _last_resort_top(raw, want=min(req.max_results, 10), require_website=True)
+        if kept_online:
+            kept = kept_online
+            intent_overridden = True
+            relaxed = True
+            for lead in kept:
+                merged = dict(lead.signals or {})
+                merged["intent_overridden"] = True
+                merged["original_intent"] = "offline_only"
+                lead.signals = merged
+            await on_progress("relaxing_filter", {
+                "progress": 0.93,
+                "message": (
+                    "No offline-only leads in this area — showing all "
+                    f"matches ({len(kept)}) instead."
+                ),
                 "relaxed_filter": True,
             })
 

@@ -261,9 +261,29 @@ export default function ScrapeForm({ onResult }) {
             <span className="intent-chip">
               Searching: <strong>{intent.cleaned_niche}</strong> in <strong>{location}</strong>
             </span>
-            <span className={`intent-chip mode-${intent.require_website ? 'online' : 'offline'}`}>
-              {intent.mode_label}
-            </span>
+            {!intent.require_website ? (
+              <span className="intent-chip mode-offline">
+                Filter: only businesses without a website (you typed
+                {' '}
+                <em>"without a website"</em>) ·{' '}
+                <button
+                  type="button"
+                  className="intent-toggle"
+                  onClick={() =>
+                    setNiche((n) =>
+                      n
+                        .replace(/\bwithout\s+(?:a\s+)?website\b/gi, '')
+                        .replace(/\bno\s+website\b/gi, '')
+                        .replace(/\boffline(?:\s+only)?\b/gi, '')
+                        .replace(/\s+/g, ' ')
+                        .trim(),
+                    )
+                  }
+                >
+                  remove
+                </button>
+              </span>
+            ) : null}
           </div>
         ) : null}
 
