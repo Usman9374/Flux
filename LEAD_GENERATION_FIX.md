@@ -1,299 +1,236 @@
-# Flux Lead-Generation Overhaul — Implementation Prompt
+# Flux Lead-Generation Overhaul — v2
 
-> **Read this whole file before writing any code.** This is not a request for cosmetic tweaks. The current lead pipeline is unfit for purpose and must be rebuilt around the contract defined here. Treat every section as a hard requirement unless it is explicitly labelled "Nice to have".
-
----
-
-## 0. Context — what is broken today
-
-Flux is a B2B prospecting tool, advertised as "Apollo-style apollo.io btw". Today the scraper is a single-source Google Maps crawler with a cosmetic progress bar. Real user complaints, verbatim:
-
-1. **"It always gets stuck at 92%."** The UI animates to 92 and waits on a single blocking `POST /api/scrape` that can take minutes. There is no real progress signal, no streaming, and no early partial results.
-2. **"It took so long and gave me two restaurants."** Final kept count is frequently `0` or `1–2` out of `max_results=20`. The user asked for *"restaurants in Islamabad without a website"* and got Serena Hotels (a five-star international chain, has a website) and OX and Grill (well-established, has a website). Both should have been rejected by the inverted filter. They were not.
-3. **"It gives me random baseless websites."** Aggregator/social profile URLs and unrelated domains slip through as `lead.website`.
-4. **"Sometimes it just gives me 0 results."** Either the Maps page never loaded, the consent screen blocked, or every lead was filtered out by an over-tight `min_quality_score`. The user gets nothing back and no explanation.
-5. **"It's not fetching the tier properly."** (User said "tier" — assume they mean *category* / *niche fit* / *quality tier*.) Leads come back with no clear category match, no quality grade visible in the UI, and no way to tell why a given lead was kept.
-
-The bar to clear is **Apollo.io**: every row returned must be a real, contactable, on-target business — not a directory entry, not a chain branch, not a closed venue, not a random listing that happens to contain one of the search words.
+> Read the whole file before changing code. v1 of this doc tried to make the
+> Google-Maps-only pipeline behave like Apollo by piling more verification on
+> top of it. That doesn't work, and the real reason is in §0. v2 tears out
+> the Maps dependency, replaces it with multiple cooperating HTTP sources,
+> and simplifies the filter so we stop returning empty.
 
 ---
 
-## 1. Files you will touch
+## 0. Why "0 leads" is the steady-state today
 
-You may add files. Do **not** delete files without understanding their callers first.
+The current pipeline depends on Playwright launching Chromium and scraping
+Google Maps from the production dyno (Render). Three things make that
+configuration fail almost every time in production:
 
-Backend:
-- `backend/app/scraper/runner.py` — orchestration; needs streaming + fallback logic.
-- `backend/app/scraper/sources/google_maps.py` — selectors + website detection are too brittle.
-- `backend/app/scraper/quality.py` — scoring and intent parsing; inverted-website mode is broken in practice.
-- `backend/app/scraper/website_enrich.py` — needs to also *confirm* that a lead has no website before we trust the "no website" verdict.
-- `backend/app/scraper/types.py` — extend the data model (tier, confidence, source attribution).
-- `backend/app/routes/scrape.py` — switch to a job + polling or SSE/WebSocket pattern.
-- `backend/app/schemas.py` — add the new fields to API output.
-- `backend/app/scraper/sources/` — **add new source modules** (see §6).
+1. **Google blocks data-center IPs aggressively.** When Maps is hit from a
+   Render IP it serves the consent loop indefinitely, returns an empty
+   feed, or 429s. Local dev works because home/office IPs are not flagged;
+   production silently returns 0 results.
+2. **Chromium on a 512 MB Render dyno is fragile.** The launch races OOM,
+   and when it survives the page navigations exceed the 90 s wall clock.
+   Every per-stage timeout fires and the run ends with `partial=True` and
+   `kept=0`.
+3. **Even when scraping works, the filter throws everything away.**
+   `quality.py` requires (a) the niche tokens to appear in the Maps
+   `category` text, (b) the location tokens to appear in the address text,
+   (c) at least one contact channel, and (d) a quality score ≥ 40. A real
+   lead with a complete-but-differently-worded category ("Indian
+   restaurant" vs. "restaurants in Islamabad") is rejected, and there is
+   nothing to fall back to.
 
-Frontend:
-- `frontend/src/components/ScrapeForm.jsx` — replace fake 92% animation with real progress.
-- Wherever leads are rendered — surface tier, confidence, signals, and rejection reasons (for transparency / debugging).
+Two secondary problems make every failure look like a deeper bug:
 
-Do not change `firestore.rules`, auth, or unrelated routes.
+4. **DuckDuckGo HTML is the only fallback** and it's just used to "verify"
+   the offline-mode lead, never to generate leads on its own. So when
+   Maps is empty, backfill is empty too.
+5. **`min_quality_score=40` is the default everywhere** (backend +
+   frontend). After the strict hard rejects, almost nothing scores ≥ 40
+   from a single source. The relaxed-filter floor only activates if
+   `raw_count > 0`, but the typical failure mode is `raw_count == 0`.
 
----
-
-## 2. The non-negotiable contract
-
-A lead returned to the user **MUST** satisfy all of these:
-
-1. **It is a real, currently-operating business** — not "permanently closed", not "temporarily closed".
-2. **It is contactable** — at least one of: first-party website, business phone, or business email. A lead with none of these is worthless. Reject it.
-3. **It matches the requested niche** — the `category` field on the Maps card, or the homepage `<title>`/`<meta description>`, must contain at least one niche token (after stop-word removal). A query for "restaurants" must not return a hotel unless the hotel's primary Maps category is `Restaurant`.
-4. **It matches the requested location** — the address must contain a token from the location string OR fall inside the Maps viewport that was queried. No leads from a different city.
-5. **It is not a directory/aggregator** — the website field, if present, must not resolve to any host in `AGGREGATOR_DOMAINS`. Hard reject. No exceptions.
-6. **Intent is respected.** When the user types "without website" / "no website" / "offline only" / a similar phrase, the *only* leads returned are those that genuinely have no first-party website. See §4 for the verification procedure — the current implementation trusts the absence of a Maps detail field, which is exactly why Serena and OX and Grill slipped through.
-7. **Every field is either correct or absent.** A wrong website is worse than no website. If detection confidence is low, leave the field blank and set `signals.website_confidence = "low"`. Never invent or guess a URL.
-
-If you cannot satisfy a rule for a given lead, drop it. Quality over volume.
+Result: Render → Maps → 0 cards → 0 verified → 0 kept. Every time.
 
 ---
 
-## 3. Lead schema — what every row must look like
+## 1. The fix in one sentence
 
-Extend `ScrapedLead` with the following. Existing fields stay.
-
-```python
-@dataclass
-class ScrapedLead:
-    # --- identity ---
-    name: str
-    category: str | None           # primary Maps category (e.g. "Restaurant")
-    niche: str | None              # the cleaned user query
-    location: str | None           # the cleaned user location
-
-    # --- contact (required: at least one of website/phone/email) ---
-    website: str | None
-    phone: str | None              # E.164 where possible
-    email: str | None
-    social_links: dict[str, str]   # {"facebook": "...", "instagram": "..."}
-
-    # --- presence ---
-    address: str | None
-    plus_code: str | None
-    hours: str | None
-    map_url: str | None            # canonical Google Maps URL (was: source_url)
-
-    # --- reputation ---
-    rating: float | None
-    reviews: int | None
-    years_in_business: int | None  # if available from listing or homepage footer
-
-    # --- content for outreach ---
-    description: str | None        # max 600 chars, plain text
-    tagline: str | None            # short one-liner if extractable
-
-    # --- scoring + transparency (NEW) ---
-    quality_score: int | None      # 0-100, see §5
-    tier: str | None               # "A" | "B" | "C" — see §5
-    confidence: float | None       # 0.0-1.0, how sure we are about the contact info
-    signals: dict[str, Any]        # boolean flags used in scoring; ALSO surface in UI
-    rejection_reason: str | None   # populated only for dropped leads; useful for debugging
-    sources: list[str]             # ["google_maps", "homepage", "facebook_about"]
-    fetched_at: datetime           # UTC; required for staleness checks later
-```
-
-Persist all of this. Surface `tier`, `confidence`, the top 3 `signals`, and (in admin views) `rejection_reason`.
+Stop relying on browser scraping as the primary source. Make the primary
+source pure-HTTP — **OpenStreetMap Overpass + Nominatim** — and treat
+Google Maps as one of several optional, best-effort enrichments. Soften the
+filter so the work the sources did isn't immediately discarded.
 
 ---
 
-## 4. Intent parsing — fix "without website" properly
+## 2. Source mix
 
-The current `parse_intent` in [quality.py](backend/app/scraper/quality.py) detects the phrase fine. The bug is downstream: a lead's `website` field is set from `a[data-item-id="authority"]` on the Maps detail panel. **If that selector misses (it does, frequently — Google A/Bs the panel), the lead ends up with `website=None` and passes the inverted filter as a false positive.** That is exactly how Serena and OX and Grill came through.
+| Source | Transport | Role | Required |
+|---|---|---|---|
+| **OSM Overpass** | HTTPS GET (no key) | Primary — POIs in a bounding box, with `name`, `addr:*`, `contact:phone`, `contact:website`, `contact:email`, `opening_hours` | yes |
+| **Nominatim** | HTTPS GET (no key) | Geocode the user's `location` string into a bounding box for Overpass | yes |
+| **DuckDuckGo HTML** | HTTPS POST | Backfill candidate names/websites; verify "no website" claim | yes |
+| **Google Maps (Playwright)** | Browser | Optional best-effort. If Playwright isn't installed, or Chromium fails to launch, or a navigation throws, log + skip — never abort the run | no |
+| **Website fetch** | httpx | Per-lead enrichment of the homepage / `/contact` / `/about` for email + socials + description | yes |
 
-### Required fix
-
-When `require_website=False` (user asked for offline businesses), a lead may only be kept if **all** of the following hold:
-
-1. The Maps detail panel did not surface a website URL.
-2. **A search-engine verification step** ran for this business and returned no plausible first-party site.
-3. (Optional but recommended) A direct domain probe of `{slugified_name}.com` / `{slugified_name}.co` / `{slugified_name}.{tld_of_country}` returned 404 / NXDOMAIN, not 200.
-
-The verification step:
-
-- Query DuckDuckGo HTML (or Bing, or SerpAPI if a key is configured) with `"{business name}" {location}`.
-- Parse the first 5 result URLs.
-- For each, strip aggregator domains. If any non-aggregator domain remains AND its homepage `<title>` or visible `<h1>` contains a fuzzy match for the business name (Levenshtein ratio ≥ 0.75), treat that as the business's website. **Lead is rejected from `require_website=False` mode and re-tagged as "actually has a website".**
-
-Confidence threshold for "actually has a website":
-- `confidence ≥ 0.8` → reject from offline mode.
-- `confidence 0.5–0.8` → keep, but set `signals.possible_website` to the URL and `signals.website_unverified=True`. User sees both.
-- `confidence < 0.5` → keep as offline lead.
-
-### Why we can't skip this
-
-Maps frequently lists the website on cards but not in the detail panel, and vice versa. A chain (Serena Hotels) sometimes has the website surfaced only at the parent-brand page, not the branch listing. A purely scraper-based test is not enough. **Without the search verification step, "without website" mode is unusable.** It is the single biggest user complaint. Fix it first.
+The pipeline must produce a lead set even when only OSM and DDG are
+available. Render in production currently has no working Playwright path;
+we still need to ship leads from there.
 
 ---
 
-## 5. Scoring & tiering — replace the current scorer
-
-Current scorer in [quality.py:130](backend/app/scraper/quality.py) is additive and ceiling-bound, which causes two failure modes:
-- Leads with strong reputation but poor reachability score equal to leads with poor reputation but strong reachability — the user can't tell them apart.
-- The `min_quality_score=35` default is met by garbage (just having a name + phone + address).
-
-Replace it with a **tiered + weighted** scheme:
+## 3. Pipeline contract
 
 ```
-tier A (90+): own website + phone + email + matched category + rating ≥ 4.0 with ≥ 25 reviews + location match.
-tier B (65-89): own website + at least one of phone/email + matched category + location match.
-tier C (40-64): contactable + matched category, but missing reputation OR missing one contact channel.
-< 40: drop.
+parse_intent(niche)
+  ↓
+geocode(location)               → bounding box + country code
+  ↓
+parallel:
+  ├─ osm_search(niche, bbox)    → ScrapedLead[]
+  ├─ ddg_search(niche, location)→ ScrapedLead[]
+  └─ gmaps_scrape(niche, loc)   → ScrapedLead[]   (best-effort)
+  ↓
+merge + dedupe (by lower(name) + city + phone/domain)
+  ↓
+verify_offline_mode (only if require_website=False)
+  ↓
+filter_and_score                → annotate tier/score/signals
+  ↓
+enrich_websites (top N kept)    → email, socials, description
+  ↓
+final_floor                      → if kept==0 and any source returned
+                                   ANY rows, keep the top 5 by raw signal
+                                   strength with `relaxed_filter=True`
 ```
 
-For `require_website=False` mode the website axis flips: tier A requires phone + email + matched category + reputation. No website allowed at all.
+Key rules:
 
-Scoring rules:
-
-| Signal | Weight | Notes |
-|---|---|---|
-| First-party website (verified, non-aggregator) | 25 | 0 if `require_website=False` and a site is detected → rejected outright. |
-| Business phone (E.164-able, not toll-free spam list) | 15 | Must be reachable. Drop if it matches known spam ranges. |
-| Direct email (info@, contact@, name@) | 20 | Generic `info@` worth less than a named mailbox; weight 12 vs 20. |
-| Category exact-match (Maps category contains niche token) | 15 | Required, not optional. 0 if no overlap → reject. |
-| Location match (city/area token in address, OR within ~25km of geocoded query) | 10 | Required, 0 → reject. |
-| Rating ≥ 4.0 AND reviews ≥ 25 | 8 | Strong reputation signal. |
-| Reviews ≥ 100 | 5 | Independent of rating — longevity. |
-| Socials present (≥ 2 platforms, business handles, not share buttons) | 4 |  |
-| Description ≥ 80 chars from `<meta>` or Maps editorial | 3 |  |
-| Hours present | 2 |  |
-
-Hard rejects (score forced to 0 → dropped, with reason):
-- Name length < 3.
-- Aggregator/social-only website.
-- Permanently/temporarily closed.
-- Category no-overlap with niche.
-- Location no-overlap with location.
-- Rating < 2.5 with ≥ 10 reviews.
-- Duplicate of an already-kept lead (same phone, or same normalized domain, or fuzzy name match within same address).
-
-`confidence` is independent of score and reflects how sure we are about the *contact info*: number of corroborating sources for the website (Maps + homepage `<link rel="canonical">` + Facebook About + Bing result all agreeing → 1.0; only Maps card → 0.4).
+- **Zero is unacceptable** when any source returned any rows. Floor to top
+  5 by `(has_phone, has_website, rating, reviews)` and surface
+  `relaxed_filter=True` so the UI can say "showing best available".
+- **Source labels are visible.** Each lead carries `lead.sources = ["osm",
+  "duckduckgo", ...]` so the user (and we) can see where it came from.
+- **Default `min_quality_score=0`.** The tier (A/B/C/D) does the
+  filtering. Hard rejects still drop garbage. The score is a sort key, not
+  a cliff.
 
 ---
 
-## 6. Sources — Google Maps alone is not enough
+## 4. OSM mapping
 
-A second source is required to (a) verify websites for the "without website" flow and (b) backfill when Maps returns a thin or no result set. Add at least one of these, behind a feature flag if API keys are needed:
+`backend/app/scraper/niche_taxonomy.py` maps free-text niches → OSM
+tag-value pairs. Examples:
 
-1. **Search-engine fallback** (`sources/search_engine.py`). DuckDuckGo HTML is no-auth and free; use it as the default. Bing Web Search API and SerpAPI are upgrades when keys are present (`config.py`). For each business name from Maps, run one query to verify the website. Also: when Maps returns < 5 results for a query, run a fresh search-engine query and parse out business names + URLs to backfill.
-2. **OpenStreetMap / Nominatim + Overpass** (`sources/osm.py`). Free, no key, decent for "X near Y" listings. Use for the **backfill** path when Maps fails or is throttled. OSM data has fewer websites but more obscure local businesses — exactly what "without website" mode wants.
-3. **Facebook page resolution** (best-effort). For each lead without a website, search Facebook for the business name + city and capture the public page URL + email if visible in the About section. Treat this as enrichment, not a primary source. Rate-limit aggressively and stop on captcha. Skip in headless mode if Facebook starts demanding login.
+| Niche keyword | OSM tags |
+|---|---|
+| restaurant, food, dining | `amenity=restaurant`, `amenity=fast_food`, `amenity=cafe` |
+| dental, dentist | `amenity=dentist`, `healthcare=dentist` |
+| doctor, clinic | `amenity=doctors`, `amenity=clinic`, `healthcare=doctor` |
+| hospital | `amenity=hospital` |
+| pharmacy, chemist | `amenity=pharmacy`, `healthcare=pharmacy` |
+| law firm, lawyer, attorney | `office=lawyer` |
+| accountant, accounting | `office=accountant` |
+| salon, hair, barber | `shop=hairdresser`, `shop=beauty` |
+| gym, fitness | `leisure=fitness_centre`, `sport=fitness` |
+| hotel | `tourism=hotel` |
+| cafe, coffee | `amenity=cafe` |
+| bakery | `shop=bakery` |
+| roofer, roofing | `craft=roofer` |
+| plumber, plumbing | `craft=plumber` |
+| hvac, heating, ac | `craft=hvac` |
+| electrician | `craft=electrician` |
+| real estate, realtor | `office=estate_agent` |
+| auto repair, mechanic | `shop=car_repair`, `amenity=car_repair` |
+| car dealer, dealership | `shop=car` |
+| gas station, petrol | `amenity=fuel` |
+| bank | `amenity=bank` |
+| school | `amenity=school` |
+| nursery, daycare, childcare | `amenity=childcare`, `amenity=kindergarten` |
+| veterinarian, vet | `amenity=veterinary` |
 
-Wire it up so every keep candidate is enriched by *at least two independent sources* before it is returned. Track which sources contributed in `lead.sources`.
+Anything we can't map falls back to a free-text Overpass `name~"<niche>"`
+search. That returns less, but it returns *something*.
 
----
-
-## 7. Reliability — no more "0 out of 20" with no explanation
-
-Make the pipeline degrade gracefully.
-
-1. **Per-stage timeouts with partial returns.** If Maps scroll succeeds but detail-panel enrichment times out, return what we have with a `partial=True` flag and `tier` recalculated from what's known. Never silently produce zero results when there are raw cards in hand.
-2. **Floor for kept results.** If `kept_count == 0` after final filtering, automatically re-run the filter with relaxed `min_score` (drop one tier at a time down to C) and surface the result with a flag `signals.relaxed_filter=True` so the UI can say "no A-tier leads found, showing best available". Never return zero unless `raw_count` is also zero.
-3. **Maps consent loop.** The current consent handler tries three button labels and then gives up. Add a 5s retry, then a region-spoof retry (`?hl=en&gl=us` → `?hl=en&gl={country_code(location)}`). If the country code is wrong for the location (we send `gl=us` for a query in Islamabad) Maps rate-limits and serves the consent loop more aggressively. Pick `gl` from the location string when possible.
-4. **Selector drift telemetry.** If `_CARDS_JS` returns < 3 cards on a query that worked yesterday, log a `SELECTOR_DRIFT` warning with the page HTML's hash and the URL. Don't crash. Don't return empty silently.
-5. **Retry topology.** Currently `with_retries` wraps the whole scrape. Move retries to per-stage: scroll feed, extract cards, enrich one detail, verify website. A single bad detail page should not nuke the whole run.
-6. **Hard wall-clock cap.** A scrape may not exceed 90 seconds end-to-end by default (configurable via the request). If it does, return whatever is ready and mark `partial=True`. Stuck-at-92%-forever is unacceptable.
-
----
-
-## 8. Progress reporting — kill the fake 92%
-
-Replace the cosmetic interval in [ScrapeForm.jsx:33-39](frontend/src/components/ScrapeForm.jsx#L33-L39).
-
-Backend pattern:
-- `POST /api/scrape` becomes `POST /api/scrape/jobs` → returns `{ job_id }` immediately.
-- Worker runs the pipeline and emits status updates to a Redis pub/sub channel or, simpler for now, an in-memory dict keyed by job_id (single-process Render dyno — acceptable for v1).
-- Client opens `GET /api/scrape/jobs/{job_id}/events` (SSE) and receives a stream of:
-  ```json
-  {"stage": "searching", "progress": 0.05, "message": "Querying Google Maps…"}
-  {"stage": "scrolling", "progress": 0.25, "raw_count": 14}
-  {"stage": "enriching_details", "progress": 0.55, "enriched": 8, "total": 14}
-  {"stage": "verifying_websites", "progress": 0.78}
-  {"stage": "scoring", "progress": 0.92}
-  {"stage": "done", "progress": 1.0, "result": { ... full ScrapeResultOut ... }}
-  ```
-- Frontend's progress bar reads the `progress` field. No more synthetic 92%.
-
-If implementing SSE feels like scope creep, the minimum viable alternative is polling: `GET /api/scrape/jobs/{job_id}` every 1s returning the latest status. Either is fine. The fake animation is not.
-
-Also: the frontend must stream kept leads into the table as they come in, not all-at-once at the end. A user watching "found 6/20" make progress is a different product than a user watching a spinner.
+The Overpass query is bounded by the geocoded bbox + a 50 km radius around
+the centroid. Nominatim's `boundingbox` is reused directly. We honor the
+public-instance fair-use policy: User-Agent identifies the app, requests
+are rate-limited per call, and we cache by `(niche, location)` for 10
+minutes inside the process.
 
 ---
 
-## 9. UI/UX requirements
+## 5. Soften the filter
 
-For every returned lead, surface:
-- Tier badge (A / B / C with distinct colors).
-- Why-kept: 3 strongest signals as small chips ("rating 4.6 · 230 reviews", "verified website", "category match: Restaurant").
-- Contact channels as clickable: `tel:`, `mailto:`, website opens in new tab.
-- Map link (the Google Maps URL) so the user can verify.
+The current `quality.py` is correct in spirit but too strict in practice.
+The v2 changes:
 
-For every dropped lead (in an admin "show dropped" toggle):
-- The `rejection_reason`. Builds trust and helps debug.
-
-In the form:
-- A live preview of intent parsing: when the user types "restaurants in Islamabad without a website", show "Searching: restaurants in Islamabad · Mode: offline businesses only".
-- The `min_quality_score` slider should show a description per tier band, not a raw number.
-
----
-
-## 10. Limits & what NOT to do
-
-- **Do not** add LLM calls into the hot path. The verification step is regex + fuzzy match + HTTP. An LLM in the loop is too slow and too expensive for what is a deterministic problem.
-- **Do not** rely solely on Google Places API instead of scraping — it costs real money per request and Flux's pitch is that we extract data Apollo's clients pay for. Keep scraping as the default; allow Places API as an optional accelerator behind an env flag.
-- **Do not** widen `AGGREGATOR_DOMAINS` so aggressively that legitimate sites on Wix or Squarespace are dropped. Right now `wixsite.com` and `squarespace.com` are blanket-blocked. Replace with a check on path depth: `*.wixsite.com/business-name` is a real business homepage; bare `wixsite.com` is the platform itself. Only block the platform.
-- **Do not** silently catch every exception. Existing code is full of `except Exception: pass` — keep them narrow and `log.warning` at minimum. We cannot debug a pipeline that swallows errors.
-- **Do not** ship without tests. At minimum: a fixture-based test for `parse_intent`, a unit test for `is_aggregator`, a unit test for the new scorer that asserts tier boundaries, and an offline-fixture test that feeds a saved Maps HTML page to the parser and asserts ≥ N cards extracted. Use `pytest`. Live-scrape tests gated behind an env flag.
-- **Do not** persist leads that failed the contract in §2. The DB should only contain things the user could realistically contact today.
-- **Do not** invent contact data. Empty fields are honest. Wrong fields destroy trust.
+1. **Category match.** When the lead came from OSM and the OSM tag is in
+   the niche's taxonomy entry, treat the niche as matched — don't run the
+   token comparison again. (OSM already proved the match by tag.)
+2. **Location match.** If the lead has no parsed address but has a phone
+   with a country code that matches the queried country, accept the
+   location. If the lead came from OSM and was inside the queried bbox,
+   accept the location. Don't reject solely on missing-address.
+3. **Contact channel.** Keep the rule: at least one of website/phone/email
+   is required. (No exception. A lead with none of those isn't a lead.)
+4. **Min score default = 0.** Tier A/B/C/D handles the ranking; only D is
+   dropped at the end.
+5. **De-dupe is unchanged.** Same phone/domain/normalized-name within a
+   batch → drop.
 
 ---
 
-## 11. Acceptance tests
+## 6. Hard reject list (still strict)
 
-After your changes, these queries must produce results matching the expectations. Run them against the live system, capture the output, and include it in your PR description.
+Anything matching any of these is dropped before scoring:
 
-| Query | Location | Expected behaviour |
-|---|---|---|
-| `restaurants without a website` | `Islamabad` | ≥ 5 leads, **none** with a working homepage URL. Spot-check: no Serena, no OX and Grill, no Monal, no Tuscany Courtyard. Each lead has a phone. |
-| `dental clinic` | `Lahore` | ≥ 10 tier-B-or-better leads. Each has a working website (HTTP 200 within 5s). No `facebook.com/...` as the website. Category contains "dental" or "dentist". |
-| `roofing contractor` | `Austin, TX` | ≥ 10 leads. ≥ 50% have an email after enrichment. None located outside Texas. |
-| `law firm` | `Karachi` | ≥ 8 leads. Each has rating ≥ 3.5 OR reviews ≥ 25. None marked closed. |
-| Same query twice in 10 minutes |  | Second run uses cache; returns in < 5s. Cache key includes niche + location + intent flags. |
-| Force-fail: query a nonsense niche `"qzxqzx services"` in `Paris` |  | Returns `kept=[]` with `raw_count` populated and a clear message; does not hang, does not throw 500. |
-| Wall-clock | any | Default scrape finishes in ≤ 90s. Progress bar reflects real progress. No stalls at 92%. |
-
-If any of these regress against current behaviour without good reason, the change is not done.
+- Empty or 1-character name
+- "Permanently closed" / "Temporarily closed"
+- Website is a known aggregator/social profile (per `AGGREGATOR_DOMAINS`)
+- No contact channel at all
+- Rating < 2.5 with ≥ 10 reviews
+- Toll-free / spam phone prefix
+- Duplicate of an already-kept lead
 
 ---
 
-## 12. Order of operations (suggested)
+## 7. UI / progress
 
-You do not have to follow this order, but it is the order that gets value to the user fastest.
+The job-and-poll flow already in `routes/scrape.py` and `ScrapeForm.jsx`
+is fine — keep it. Only the defaults change:
 
-1. Fix the "without website" verification (§4). One scraper change, one new module, biggest user-visible win.
-2. Replace the scorer with tiers (§5). Surfaces value to the user immediately.
-3. Add the search-engine source for verification + backfill (§6).
-4. Add real progress reporting + job polling (§8).
-5. Add per-stage timeouts and the "never return zero" floor (§7).
-6. Add the new schema fields and surface them in the UI (§3, §9).
-7. Write the acceptance tests (§11). Run them. Iterate.
+- Default `min_quality_score = 0` in the form (was 40). The slider stays
+  but defaults out of the way.
+- Show source pills next to each lead (`OSM`, `DDG`, `Maps`).
+- Show the empty-state with the actual reason — "OSM returned 0 in this
+  area; try a broader niche or a nearby city" — instead of a silent
+  spinner-to-zero.
 
 ---
 
-## 13. Definition of done
+## 8. Acceptance
 
-- All seven §11 queries pass.
-- No `except Exception: pass` introduced by this change.
-- New tests added and green.
-- The progress bar never advances without a backend signal.
-- A code reader who has never seen the project can run a single command, point Flux at "restaurants without a website in Islamabad", and get a screen of real, contactable, offline-only restaurants in under two minutes.
+After the rewrite, a clean prod scrape MUST satisfy:
 
-If you find a §1–§11 requirement that is wrong or impossible, stop and flag it in the PR description. Do not silently work around it.
+- `restaurants in Islamabad` → ≥ 10 leads from OSM alone, ≥ 5 with phone.
+- `dentists in Lahore` → ≥ 10 leads.
+- `roofing contractor in Austin, TX` → ≥ 5 leads.
+- `restaurants without a website in Islamabad` → ≥ 5 leads, none with a
+  verified first-party homepage.
+- A query for a nonsense niche → `kept=[]`, clear message, no 500.
+- No run takes more than the configured wall-clock.
+- No run exits with `kept=0` when *any* source returned ≥ 1 row — the
+  relaxed-filter floor must catch it.
+
+---
+
+## 9. What NOT to change
+
+- Auth, Firebase, persistence, Vercel/Render config — out of scope.
+- The job-progress + SSE machinery — works, leave it.
+- The `AGGREGATOR_DOMAINS` list — already correct after the v1 fix that
+  separated platform homepages from customer subdomains.
+
+---
+
+## 10. Order
+
+1. `niche_taxonomy.py` — small map, foundation for everything else.
+2. `sources/osm.py` — Nominatim + Overpass + parser → ScrapedLead.
+3. `runner.py` — parallel sources + merge + floor.
+4. `quality.py` — soften category/location, default min_score=0.
+5. `schemas.py` + `types.py` — defaults.
+6. Frontend — default `minScore=0`, source pills.
+7. Tests for the taxonomy + the OSM parser fixtures.
+8. Build + deploy.

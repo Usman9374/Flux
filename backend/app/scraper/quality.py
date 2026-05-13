@@ -24,6 +24,7 @@ import re
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
+from .niche_taxonomy import synonyms_for
 from .types import ScrapedLead
 
 # Bare platform / aggregator hosts — pure platform pages are blocked,
@@ -190,15 +191,27 @@ def _tokens(text: str | None) -> list[str]:
 def category_matches_niche(category: str | None, niche: str | None) -> bool:
     """True if any meaningful niche token appears in the category string.
 
-    Falls back to a prefix-stem check (first 4 chars) so that "dental" matches
-    "dentist", "lawyer" matches "law", "restaurant" matches "restaurants",
-    etc. Without that, Maps' singular "Dentist" category would fail to match
-    a "dental clinic" query — exactly the regression LEAD_GENERATION_FIX
-    flagged.
+    Three layers, cheapest first:
+      1. Taxonomy synonyms — "dentist" niche accepts "dental clinic"
+         category and vice versa, even when the strings don't share a
+         token.
+      2. Exact substring of any niche token.
+      3. Prefix-stem (first 4 chars) so "dental" matches "dentist", etc.
+
+    Without the taxonomy layer, Maps' "Indian restaurant" category gets
+    rejected by a "restaurants in Islamabad" niche — exactly the kind of
+    over-strict reject that causes the empty-result complaint.
     """
     if not category or not niche:
         return False
     cat = category.lower()
+
+    # Layer 1: taxonomy synonyms.
+    for syn in synonyms_for(niche):
+        if syn and syn in cat:
+            return True
+
+    # Layer 2/3: token + stem.
     cat_tokens = _tokens(category)
     for nt in _tokens(niche):
         if nt in cat:
@@ -248,16 +261,30 @@ def rejection_reason(lead: ScrapedLead, *, require_website: bool = True) -> str 
     if lead.website and is_aggregator(lead.website):
         return "website is a directory/social profile, not first-party"
 
-    # Niche / location alignment is mandatory.
-    # If we don't have a category, fall back to checking the lead name.
+    # Niche alignment. If the source already proved the match (OSM tag),
+    # trust it; otherwise check category text, then last-resort the
+    # business name. Only reject when *all* paths fail.
     if lead.niche:
-        if lead.category and not category_matches_niche(lead.category, lead.niche):
-            # Last-chance: niche token in business name (e.g. "Smile Dental Clinic" for "dental").
-            if not category_matches_niche(lead.name, lead.niche):
+        sigs = lead.signals or {}
+        source_proven = sigs.get("category_match_source") in ("osm_tag",)
+        if not source_proven:
+            cat_ok = lead.category and category_matches_niche(lead.category, lead.niche)
+            name_ok = category_matches_niche(lead.name, lead.niche)
+            if lead.category and not cat_ok and not name_ok:
                 return f"category {lead.category!r} doesn't match niche {lead.niche!r}"
 
-    if lead.location and lead.address and not location_matches(lead.address, lead.location):
-        return f"address doesn't include any token from location {lead.location!r}"
+    # Location alignment. We accept the lead if any of these hold:
+    #   - the address contains a token from the queried location, or
+    #   - the lead came in from inside the geocoded bounding box
+    #     (signals.location_match_geo set by the source), or
+    #   - we don't have an address at all (common for OSM nodes / DDG
+    #     candidates) — better to keep the lead than silently drop it.
+    if lead.location and lead.address:
+        sigs = lead.signals or {}
+        if not sigs.get("location_match_geo") and not location_matches(
+            lead.address, lead.location
+        ):
+            return f"address doesn't include any token from location {lead.location!r}"
 
     if require_website:
         if not lead.website:
@@ -322,9 +349,13 @@ def score_lead(lead: ScrapedLead, *, require_website: bool = True) -> tuple[int,
         score += 4
         signals["has_socials"] = True
 
-    # Niche fit — strict. category_matches_niche already required to keep the lead.
+    # Niche fit. If the source proved the match (OSM tag), credit it
+    # without re-running the text comparison. Otherwise check category
+    # text and the name as fallbacks.
+    src_matched = (lead.signals or {}).get("category_match_source") in ("osm_tag",)
     if lead.niche and (
-        category_matches_niche(lead.category, lead.niche)
+        src_matched
+        or category_matches_niche(lead.category, lead.niche)
         or category_matches_niche(lead.name, lead.niche)
     ):
         score += 15
@@ -370,16 +401,18 @@ def _tier_for(
 ) -> str:
     """Derive A/B/C/D tier from the signal mix, not just the raw score.
 
-    Rules (§5 of LEAD_GENERATION_FIX.md):
-      A (90+):   website + phone + email + category + reputation + location.
-      B (65-89): website + (phone or email) + category + location.
-      C (40-64): contactable + category, but missing some.
-      D (<40):   dropped — caller filters this out.
+    Rules (v2 of LEAD_GENERATION_FIX.md §5):
+      A:  website + phone + email + category + reputation + location.
+      B:  website + (phone or email) + category + location.
+      C:  contactable + category + location, but missing some signals.
+      D:  no usable signal mix at all — dropped.
 
-    In require_website=False mode, the website axis flips: A requires
-    phone + email + category + reputation; no website at all.
+    The numeric cliff is 25 (down from 40 in v1). v1's 40-cliff dropped
+    most OSM-only leads — name + phone + tag-matched category + bbox
+    location scored exactly 40, which is too thin a margin. We let tier
+    decide and only D-tier gets removed.
     """
-    if score < 40:
+    if score < 25:
         return "D"
 
     has_phone = signals.get("has_phone", False)

@@ -16,16 +16,22 @@ const NICHE_SUGGESTIONS = [
 
 const STAGE_LABELS = {
   queued: 'Queued',
-  searching: 'Querying Google Maps',
-  scrolling: 'Loading result feed',
-  enriching_details: 'Reading detail panels',
-  backfill: 'Backfilling from search engine',
+  searching: 'Preparing search',
+  geocoding: 'Locating area on the map',
+  running_sources: 'Querying sources (OSM, search, Maps)',
+  merging: 'Merging + de-duping results',
   verifying_websites: 'Verifying websites',
   enriching_websites: 'Fetching contact info from websites',
   scoring: 'Scoring leads',
   relaxing_filter: 'No top-tier leads — relaxing filter',
   done: 'Done',
   error: 'Error',
+}
+
+const SOURCE_LABELS = {
+  osm: 'OSM',
+  duckduckgo: 'Web',
+  google_maps: 'Maps',
 }
 
 const POLL_INTERVAL_MS = 1000
@@ -40,6 +46,7 @@ function tierTone(tier) {
 
 function MiniLeadRow({ lead }) {
   const tier = lead.tier || 'C'
+  const sources = Array.isArray(lead.sources) ? lead.sources : []
   return (
     <div className={`scrape-lead-row tier-${tier.toLowerCase()}`}>
       <span className={`tier-badge tone-${tierTone(tier)}`}>{tier}</span>
@@ -48,6 +55,9 @@ function MiniLeadRow({ lead }) {
         {lead.category || '—'}
         {lead.phone ? ` · ${lead.phone}` : ''}
         {lead.website ? ' · website' : ''}
+        {sources.length
+          ? ` · ${sources.map((s) => SOURCE_LABELS[s] || s).join('+')}`
+          : ''}
       </span>
       <span className="scrape-lead-score">{lead.quality_score ?? '—'}</span>
     </div>
@@ -58,7 +68,7 @@ export default function ScrapeForm({ onResult }) {
   const [niche, setNiche] = useState('')
   const [location, setLocation] = useState('')
   const [maxResults, setMaxResults] = useState(20)
-  const [minScore, setMinScore] = useState(40)
+  const [minScore, setMinScore] = useState(0)
   const [running, setRunning] = useState(false)
   const [progress, setProgress] = useState(0)
   const [stage, setStage] = useState('queued')

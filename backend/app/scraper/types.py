@@ -9,7 +9,10 @@ class ScrapeRequest:
     location: str
     max_results: int = 20
     headless: bool = True
-    min_quality_score: int = 40
+    # Default 0 — tier (A/B/C) does the filtering. The slider in the UI
+    # is a sort/floor knob, not a cliff. v1's 40 default rejected most
+    # single-source leads silently. See LEAD_GENERATION_FIX.md §5/§7.
+    min_quality_score: int = 0
     # Filter intent — None means "infer from the niche string"
     # (e.g. "dental clinics without website" → False).
     # True drops listings that have no first-party website (default Apollo-style).

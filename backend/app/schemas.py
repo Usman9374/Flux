@@ -54,7 +54,7 @@ class ScrapeRequestIn(BaseModel):
     niche: str = Field(..., min_length=2, max_length=120)
     location: str = Field(..., min_length=2, max_length=120)
     max_results: int = Field(default=20, ge=1, le=100)
-    min_quality_score: int = Field(default=40, ge=0, le=100)
+    min_quality_score: int = Field(default=0, ge=0, le=100)
     headless: bool = True
     # Optional explicit overrides — if omitted, backend infers from the niche
     # text (e.g. "dental clinics without website" toggles require_website off).
@@ -100,6 +100,7 @@ class JobLeadPreview(BaseModel):
     tier: str | None = None
     confidence: float | None = None
     signals: dict[str, Any] | None = None
+    sources: list[str] | None = None
     map_url: str | None = None
     rating: float | None = None
     reviews: int | None = None

@@ -66,6 +66,7 @@ def _lead_preview(lead: ScrapedLead) -> dict[str, Any]:
         "tier": lead.tier,
         "confidence": lead.confidence,
         "signals": lead.signals,
+        "sources": lead.sources or [],
         "map_url": lead.map_url or lead.source_url,
         "rating": lead.rating,
         "reviews": lead.reviews,
